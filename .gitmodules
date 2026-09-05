@@ -1,0 +1,3 @@
+[submodule "kkd"]
+	path = dep/kkd
+	url = git@github.com:kkdwvd/kkd.git
