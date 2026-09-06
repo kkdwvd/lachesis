@@ -2,7 +2,7 @@
 //! The `scheduler!` macro: policy instance, struct_ops table, trampolines,
 //! license.
 //!
-//! A policy implements `lachesis_rt`'s `Policy` trait and then lists the
+//! A policy implements `lachesis_runtime`'s `Policy` trait and then lists the
 //! struct_ops members it wants exported. Everything
 //! ABI-shaped -- the `extern "C"` trampolines, the context unpacking, the
 //! `#[link_section]` names, the `#[repr(C)]` table, the
@@ -203,7 +203,7 @@ macro_rules! __trampoline {
     ($sec:literal, $inst:ident, $m:ident, $sym:ident) => {
         ::core::compile_error!(::core::concat!(
             "scheduler!: unknown struct_ops member `", ::core::stringify!($m),
-            "`; add it to the Policy trait and to __trampoline! in src/trusted/ops.rs"));
+            "`; add it to the Policy trait and to __trampoline! in trusted/ops.rs"));
     };
 }
 

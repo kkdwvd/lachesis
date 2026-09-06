@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
-//! `scx_lachesis` -- load the policy, hold it, and report on it.
+//! `lachesis` -- load the policy, hold it, and report on it.
 //!
 //! This is the loader, and it is deliberately dull: argument parsing,
-//! libbpf-rs, `.bss` decoding, signals, printing. None of it is verified.
-//! Everything that decides something -- how a counter delta is computed,
-//! what an exit kind means -- is in `scx_lachesis_core`, which is verified
-//! with `--no-cheating`, and this file calls it.
+//! libbpf-rs, `.bss` decoding, signals, printing. None of it is verified,
+//! and the parts of it that are only true by inspection -- a name table, a
+//! wrapping subtraction -- stay here where that is easy to see. The one
+//! judgement it makes, what an exit kind means, comes from
+//! `lachesis_control`, which is verified with `--no-cheating` in the same
+//! pass as the policy that writes the kind down.
 //!
 //! Holding the struct_ops link is the reason the binary exists at all.
 //! `bpftool struct_ops register` pins the link and walks away, so nothing
@@ -27,19 +29,17 @@ use libbpf_rs::btf::types::{
 };
 use libbpf_rs::btf::{Btf, BtfType, HasSize, ReferencesType};
 use libbpf_rs::{MapCore, MapFlags, MapType, ObjectBuilder, PrintLevel};
-use scx_lachesis_core::{
-    classify_exit, counter_deltas, exit_kind_name, ExitClass, MAX_COUNTERS,
-};
+use lachesis_control::{classify_exit, ExitClass};
 
 const USAGE: &str = "\
-usage: scx_lachesis [options]
+usage: lachesis [options]
 
-Load scx_lachesis.o as this machine's sched_ext scheduler, hold the
+Load lachesis.o as this machine's sched_ext scheduler, hold the
 struct_ops link, print counter deltas, and report the kernel's exit reason
 on the way out.
 
   --obj PATH        the BPF object to load
-                    (default: scx_lachesis.o beside this executable)
+                    (default: lachesis.o beside this executable)
   --interval SECS   seconds between stats lines (default: 1)
   --duration SECS   detach and exit after this long (default: 5);
                     0 runs until SIGINT or SIGTERM
@@ -97,7 +97,7 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     // Four flags do not justify a dependency, and every dependency here is
-    // one more crate between a verified core and the kernel.
+    // one more crate between the verified side and the kernel.
     let mut obj = None;
     let mut interval = 1u64;
     let mut duration = 5u64;
@@ -139,7 +139,7 @@ fn parse_args() -> Result<Args, String> {
             .map_err(|e| format!("cannot find my own path: {e}"))?
             .parent()
             .ok_or("my own path has no directory")?
-            .join("scx_lachesis.o"),
+            .join("lachesis.o"),
     };
     Ok(Args {
         obj,
@@ -320,6 +320,13 @@ fn bss_layout(btf: &Btf<'_>) -> Result<Vec<Leaf>, String> {
 // ---------------------------------------------------------------------------
 // sampling
 
+/// The most counter slots one sample can carry.
+///
+/// How many counters the policy actually has is a runtime fact, discovered
+/// from the object's BTF; this is the fixed size of the arrays that hold a
+/// sample of them, and the loader refuses to start if the policy has more.
+const MAX_COUNTERS: usize = 16;
+
 struct Sample {
     vtime: u64,
     exit_kind: u64,
@@ -362,6 +369,28 @@ fn sample(leaves: &[Leaf], value: &[u8]) -> Sample {
         }
     }
     s
+}
+
+/// The kernel's own name for an exit kind.
+///
+/// The strings are `scx_exit_reason()` in `kernel/sched/ext/ext.c`, so the
+/// loader's report reads like the kernel's own. Which band the kind falls
+/// in is `classify_exit`'s business, and that one is verified; this is the
+/// wording that goes beside it.
+fn exit_kind_name(kind: u64) -> &'static str {
+    match kind {
+        0 => "none",
+        1 => "done",
+        64 => "unregistered from user space",
+        65 => "unregistered from BPF",
+        66 => "unregistered from the main kernel",
+        67 => "disabled by sysrq-S",
+        68 => "parent exiting",
+        1024 => "runtime error",
+        1025 => "scx_bpf_error",
+        1026 => "runnable task stall",
+        _ => "<UNKNOWN>",
+    }
 }
 
 fn report_exit(s: &Sample) -> i32 {
@@ -442,7 +471,7 @@ fn run() -> Result<i32, String> {
     if names.len() > MAX_COUNTERS {
         return Err(format!(
             "the policy has {} counters, more than \
-             scx_lachesis_core::MAX_COUNTERS ({MAX_COUNTERS})",
+             MAX_COUNTERS ({MAX_COUNTERS})",
             names.len()
         ));
     }
@@ -481,11 +510,15 @@ fn run() -> Result<i32, String> {
         next += args.interval;
 
         let now = read()?;
-        let deltas = counter_deltas(&prev.counters, &now.counters);
+        // Wrapping, because a `.bss` counter is a u64 the BPF side only
+        // ever increments and nothing stops it from wrapping.
         let counters: Vec<String> = names
             .iter()
             .enumerate()
-            .map(|(i, name)| format!("{name}=+{}", deltas[i]))
+            .map(|(i, name)| {
+                let d = now.counters[i].wrapping_sub(prev.counters[i]);
+                format!("{name}=+{d}")
+            })
             .collect();
         println!(
             "[{:6.1}s] vtime={} {}",
@@ -532,7 +565,7 @@ fn main() {
     match run() {
         Ok(code) => process::exit(code),
         Err(e) => {
-            eprintln!("scx_lachesis: {e}");
+            eprintln!("lachesis: {e}");
             process::exit(1);
         }
     }

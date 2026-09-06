@@ -49,7 +49,7 @@ editing the import:
   kfunc gets an incompatible guessed prototype.
 
 Upstream's `scx_simple.rs` and `scx_cosmos.rs` were not imported;
-`src/scx_lachesis/bpf/main.rs` derives from upstream's `scx_simple.rs`
+`src/sched/bpf/main.rs` derives from upstream's `scx_simple.rs`
 and lives with the scheduler, not with the toolchain.
 
 ## Toolchain matrix
@@ -89,7 +89,7 @@ differently in each because it decides keep-vs-erase by expanding
    Items not written in Verus syntax -- the kfunc externs, the `#[btf]`
    views, the `scheduler!` trampolines, the struct_ops table, the panic
    handler -- are external to Verus and are not checked. All of them now
-   live in `lachesis_trusted`.
+   live in `lachesis_runtime_trusted`.
 
 2. **Erased compile**, the rest of `rules.mk`. Plain rustc for the BPF target,
    *without* `--cfg verus_keep_ghost`, so the macro drops the specs and proofs
@@ -107,28 +107,28 @@ macro's own erasure, and the compile pipeline is trusted (roadmap section
 ### Three crates
 
 There are three crates on each side of that split, and Verus checks them
-separately, in dependency order: `lachesis_trusted` (`src/trusted`),
-`lachesis_rt` (`src/rt`), then the policy that links both. `rules.mk` drives
-them from `LIB_CRATES`, an ordered list, so a fourth library crate is one
-line plus a `_DIR`.
+separately, in dependency order: `lachesis_runtime_trusted`
+(`src/runtime/trusted`), `lachesis_runtime` (`src/runtime`), then the policy
+that links both. `rules.mk` drives them from `LIB_CRATES`, an ordered list,
+so a fourth library crate is one line plus a `_DIR`.
 
 Each library crate is verified with `--compile --export`:
 
 ```
-verus --crate-type=lib --crate-name lachesis_trusted \
-      --compile --export build/host/verus/lachesis_trusted.vir \
+verus --crate-type=lib --crate-name lachesis_runtime_trusted \
+      --compile --export build/host/verus/lachesis_runtime_trusted.vir \
       --out-dir build/host/verus \
-      --extern btf=... --extern btf_macros=... src/trusted/lib.rs
+      --extern btf=... --extern btf_macros=... src/runtime/trusted/lib.rs
 
-verus --no-cheating --crate-type=lib --crate-name lachesis_rt \
-      --compile --export build/host/verus/lachesis_rt.vir \
+verus --no-cheating --crate-type=lib --crate-name lachesis_runtime \
+      --compile --export build/host/verus/lachesis_runtime.vir \
       --out-dir build/host/verus \
-      --extern lachesis_trusted=build/host/verus/liblachesis_trusted.rlib \
-      --import lachesis_trusted=build/host/verus/lachesis_trusted.vir \
+      --extern lachesis_runtime_trusted=.../liblachesis_runtime_trusted.rlib \
+      --import lachesis_runtime_trusted=.../lachesis_runtime_trusted.vir \
       --extern btf=... --extern btf_macros=... \
       -L dependency=build/host/verus \
       -L dependency=build/host/rust-deps \
-      -L dependency=build/host/btf-macros/release/deps src/rt/lib.rs
+      -L dependency=build/host/btf-macros/release/deps src/runtime/lib.rs
 ```
 
 `--export` writes the proofs; `--compile` writes the host rlib next to
@@ -137,14 +137,14 @@ sets `verus_keep_ghost`. The policy's pass imports both crates the same way.
 
 Every `-L dependency` path is load-bearing and was the whole difficulty.
 `--extern` covers a crate's *direct* dependencies only; when rustc loads
-`lachesis_rt`'s metadata it must resolve `lachesis_trusted` by searching,
-and when it loads *that* one it must resolve `btf` and the `btf_macros`
-proc-macro dylib the same way -- the proc-macro under the hashed filename
-cargo gave it (`libbtf_macros-<hash>.so` in cargo's `deps/`, not the plain
-`libbtf_macros.so` beside it). Without them the failure is a bare
-`error[E0463]: can't find crate for 'lachesis_rt'` that says nothing about
-the real cause. The erased BPF compiles need the same paths for the same
-reason.
+`lachesis_runtime`'s metadata it must resolve `lachesis_runtime_trusted` by
+searching, and when it loads *that* one it must resolve `btf` and the
+`btf_macros` proc-macro dylib the same way -- the proc-macro under the hashed
+filename cargo gave it (`libbtf_macros-<hash>.so` in cargo's `deps/`, not the
+plain `libbtf_macros.so` beside it). Without them the failure is a bare
+`error[E0463]: can't find crate for 'lachesis_runtime'` that says nothing
+about the real cause. The erased BPF compiles need the same paths for the
+same reason.
 
 ### Why three, and why `--no-cheating` is not per crate
 
@@ -152,41 +152,57 @@ reason.
 `assume_specification`. An FFI call has no body a verifier could look at, so
 `external_body` with an assumed `ensures` is the only way to give a kfunc, a
 CO-RE field read or an atomic a specification at all -- which is why those
-live in their own crate, `lachesis_trusted`, verified without the flag.
+live in their own crate, `lachesis_runtime_trusted`, verified without the flag.
 
 The flag is not, however, a property of the crate it is passed to. Verus
 runs the check over the merged crate graph after pruning, so a crate that
-*calls* an `external_body` function out of `lachesis_trusted` is rejected
-too, pointing at the callee's source in the other crate:
+*calls* an `external_body` function out of `lachesis_runtime_trusted` is
+rejected too, pointing at the callee's source in the other crate:
 
 ```
 error: external_body/assume_specification not allowed with --no-cheating
-  --> src/trusted/scx.rs:53:1
+  --> src/runtime/trusted/scx.rs:53:1
 ```
 
-`lachesis_rt` calls none of them -- pruning drops them and the flag stays
-on -- but the policy calls several, so its pass runs without it.
+`lachesis_runtime` calls none of them -- pruning drops them and the flag
+stays on -- but the policy calls several, so its pass runs without it.
 `make lint-trusted` is what enforces the boundary in practice: no cheat and
-no `unsafe` anywhere under `src/` outside `src/trusted/`, checked before
-every verification pass, with `make trusted-lines` reporting the size of
-what is left.
+no `unsafe` anywhere under `src/` outside `src/runtime/trusted/`, checked
+before every verification pass, with `make trusted-lines` reporting the size
+of what is left.
 
-`make scx-lachesis` runs pass 1 for all three crates and for the userspace
-core, then pass 2 for all three; the erased compiles depend on the
-verification stamps, so a broken proof -- in any of the four -- stops the
-build before anything is compiled. `VERIFY=0` skips
-verification and prints a warning on every build -- for debugging the
-pipeline, never for anything you intend to load.
+`make lachesis` runs pass 1 for all three crates and for the control crate,
+then pass 2 for all three; the erased compiles depend on the verification
+stamps, so a broken proof -- in any of the four -- stops the build before
+anything is compiled. `VERIFY=0` skips verification and prints a warning on
+every build -- for debugging the pipeline, never for anything you intend to
+load.
 
 ## The userspace side
 
-A program directory may also carry a cargo project, and `scx_lachesis`
-does: the loader binary and, as a workspace member, the verified core it
-calls. `rules.mk` drives it from two variables the program's Makefile sets,
-`USER_MANIFEST` and `USER_CORE_SRC`, both relative to that directory. Set
-neither and none of this happens; the BPF object is the whole build.
+The pipeline can also build a userspace binary and verify a crate that
+binary calls, and `lachesis` uses both. `rules.mk` drives them from three
+variables the program's Makefile sets: `USER_MANIFEST`, a `Cargo.toml` whose
+`[[bin]]` is named `$(PROG)`; `USER_CORE_SRC`, the `lib.rs` of the verified
+crate; and `USER_CORE_NAME`, that crate's name. Set none and none of this
+happens; the BPF object is the whole build.
 
-Three things about it are not obvious.
+The two live apart on purpose. `src/loader` is the loader binary, unverified
+and named `lachesis` like the object; `src/sched/control` is
+`lachesis_control`, verified in the same `make verify` as the policy it sits
+beside, because what it decides -- how to read the scheduler's exit -- is
+part of the scheduler and not part of the plumbing that loads it. So
+`src/sched/Makefile` points `USER_MANIFEST` up at `../loader/Cargo.toml` and
+`USER_CORE_SRC` down at `control/src/lib.rs`.
+
+Four things about it are not obvious.
+
+**The loader is a workspace of one.** Cargo requires every workspace member
+to sit hierarchically below the workspace root, and `src/sched/control` is
+not below `src/loader`, so it cannot be a member. `src/loader/Cargo.toml`
+declares a bare `[workspace]` -- which stops cargo walking up to look for
+one -- and takes `lachesis_control` as an ordinary path dependency. That
+builds it exactly the same way and keeps one `Cargo.lock`, in `src/loader`.
 
 **`CARGO_TARGET_DIR` is always set.** Every cargo invocation in the
 pipeline -- `btf-macros`, `bpf-postproc`, the rust-analyzer erase-only
@@ -205,7 +221,7 @@ toolchain and the path dependencies under `dep/verus` by Verus's pin, and
 the two then refuse to link (`found crate ... compiled by an incompatible
 version of rustc`).
 
-**The `verus!` macro reaches cargo as a path dependency.** The core crate
+**The `verus!` macro reaches cargo as a path dependency.** `lachesis_control`
 depends on `verus_builtin_macros` at
 `dep/verus/source/builtin_macros`. Cargo resolves that crate's workspace
 inheritance against Verus's own workspace and builds it like any other
@@ -215,9 +231,9 @@ the crate being compiled, this cargo run does not set that cfg, and
 `dep/verus`'s `.cargo/config.toml` -- which would inject it -- is not read,
 because cargo discovers configuration from the invocation's working
 directory and not from a dependency's. `RUSTC_BOOTSTRAP` is not needed;
-none of this is on a nightly path. The core's `Cargo.toml` declares
-`check-cfg = ['cfg(verus_keep_ghost)']` so the `#[cfg]` in its prelude is
-not reported as unexpected.
+none of this is on a nightly path. `lachesis_control`'s `Cargo.toml`
+declares `check-cfg = ['cfg(verus_keep_ghost)']` so the `#[cfg]` in its
+prelude is not reported as unexpected.
 
 libbpf-rs is taken with default features, which is
 `libbpf-sys/vendored-libbpf`: libbpf itself is built from the bundled
@@ -225,10 +241,10 @@ sources and linked statically, against the system libelf and zlib. The
 fuller `vendored` feature, which also builds elfutils and zlib, is not
 needed here and would be a much longer build.
 
-The loader is verified by nothing. The core beside it is verified like a
+The loader is verified by nothing. `lachesis_control` is verified like a
 library crate, with `--no-cheating`, by a pass that imports no other crate
--- which is the reason it is a separate crate at all, since Verus verifies
-crates and the loader's dependency graph has no specifications.
+-- which is the reason it is a crate and not a module of the loader, since
+Verus verifies crates and libbpf-rs and libc have no specifications.
 
 ## No allocator
 
@@ -268,7 +284,7 @@ real `VERUS_MACROS_SO`) fail:
   rust-analyzer only.
 
 `rust-project.json` contains absolute host paths, so it is gitignored and
-regenerated with `make rust-project` (or `make -C src/scx_lachesis
+regenerated with `make rust-project` (or `make -C src/sched
 rust-project`) after a build. The crate list is generated from
 `LIB_CRATES`; `gen_rust_project.py` has the dependency edges.
 

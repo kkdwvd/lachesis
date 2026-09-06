@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-//! `lachesis_trusted` -- the trusted base, and the only place a proof may
-//! be short-circuited.
+//! `lachesis_runtime_trusted` -- the trusted base, and the only place a
+//! proof may be short-circuited.
 //!
 //! Everything that Verus cannot check, and everything `unsafe`, lives in
 //! this crate: the raw kfunc declarations, the safe wrappers whose
@@ -28,7 +28,7 @@
 //!
 //! Adding a kernel function means adding a declaration to [`kfunc`], a safe
 //! wrapper to [`scx`] and a specification to that wrapper -- here, never in
-//! `lachesis_rt` and never in a policy.
+//! `lachesis_runtime` and never in a policy.
 
 #![no_std]
 
@@ -49,7 +49,7 @@ pub mod task;
 /// which sets that cfg and supplies vstd, and the compile pass is a plain
 /// BPF rustc invocation, which does not and gets the ghost code erased by
 /// the macro. This is the only place in the tree that names that cfg;
-/// `lachesis_rt`'s prelude re-exports it.
+/// `lachesis_runtime`'s prelude re-exports it.
 #[doc(hidden)]
 pub mod vprelude {
     #[cfg(verus_keep_ghost)]
@@ -58,7 +58,7 @@ pub mod vprelude {
     pub use verus_builtin_macros::verus;
 }
 
-/// The trusted half of a policy's prelude, re-exported by `lachesis_rt`.
+/// The trusted half of a policy's prelude, re-exported by `lachesis_runtime`.
 pub mod prelude {
     pub use crate::vprelude::*;
 

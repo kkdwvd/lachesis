@@ -36,7 +36,7 @@ pub struct task_struct {
 /// member never matches the kernel's `enum scx_exit_kind` member and the
 /// object would be rejected at load time. Declaring a Rust enum of the same
 /// name puts a BTF_KIND_ENUM in the object's local BTF instead, which does
-/// match. `scx_lachesis_core::classify_exit` is where these values are
+/// match. `lachesis_control::classify_exit` is where these values are
 /// interpreted.
 #[repr(u32)]
 #[allow(non_camel_case_types, dead_code)]

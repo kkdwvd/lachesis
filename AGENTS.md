@@ -28,48 +28,66 @@ in its decision log.
   edits to the imported files. There is no submodule and no upstream to
   stay in sync with.
 
-Three crates in dependency order, each one verified and compiled against
-the ones before it:
+Four verified crates and one that is not. The BPF side is three of them
+in dependency order -- `lachesis_runtime_trusted`, `lachesis_runtime`,
+then the policy -- each verified and compiled against the ones before it.
+`lachesis_control` is verified beside them and imports none of them. The
+loader is verified by nothing.
 
-- `src/trusted` — `lachesis_trusted`, the trusted base, and the only place
-  in the tree where `unsafe` or a Verus cheat may appear. One module per
-  concern: `kfunc.rs` (the only `extern "C"` block in the tree), `scx.rs`
-  (safe wrappers over those kfuncs, their assumed contracts, and the kernel
-  constants), `task.rs` (the `#[btf]` CO-RE views, the `Task` handle and
-  its accessor specifications), `atomic.rs` (an opaque `AtomicU64` with no
-  `Ordering` in its interface), `stats.rs` (`Stats<N>`, the `.bss`
-  counters), `panic.rs` (the one `#[panic_handler]`) and `ops.rs` (the
-  `scheduler!` macro and its trampolines).
-- `src/rt` — `lachesis_rt`, the checked layer every scheduler links:
-  `policy.rs` (the `Policy` trait, where a callback's contract is written
-  down), `vtime.rs` (virtual-time arithmetic) and `lib.rs` with the
-  `prelude`. No `unsafe`, no cheats, verified with `--no-cheating`.
-- `src/scx_lachesis` — the scheduler as one cargo project: the BPF policy
-  under `bpf/`, the loader binary under `src/`, its verified core under
-  `core/`, the Makefile stub, and the `vm-run.sh`/`vm-guest.sh` pair that
-  runs the whole thing in a VM.
+- `src/runtime/trusted` — `lachesis_runtime_trusted`, the trusted base,
+  and the only place in the tree where `unsafe` or a Verus cheat may
+  appear. One module per concern: `kfunc.rs` (the only `extern "C"` block
+  in the tree), `scx.rs` (safe wrappers over those kfuncs, their assumed
+  contracts, and the kernel constants), `task.rs` (the `#[btf]` CO-RE
+  views, the `Task` handle and its accessor specifications), `atomic.rs`
+  (an opaque `AtomicU64` with no `Ordering` in its interface), `stats.rs`
+  (`Stats<N>`, the `.bss` counters), `panic.rs` (the one
+  `#[panic_handler]`) and `ops.rs` (the `scheduler!` macro and its
+  trampolines).
+- `src/runtime` — `lachesis_runtime`, the checked layer every scheduler
+  links: `policy.rs` (the `Policy` trait, where a callback's contract is
+  written down), `vtime.rs` (virtual-time arithmetic) and `lib.rs` with
+  the `prelude`. No `unsafe`, no cheats, verified with `--no-cheating`.
+  It sits beside `trusted/` and not above it because it is substrate: it
+  belongs to no one scheduler.
+- `src/sched` — one scheduler, and everything about it that is verified:
+  `bpf/main.rs` the policy, `control/` the crate `lachesis_control`, the
+  Makefile stub, and the `vm-run.sh`/`vm-guest.sh` pair that runs the
+  whole thing in a VM.
+- `src/loader` — `lachesis`, the userspace binary. Unverified by design,
+  and its own directory so that the one thing nothing checks is one
+  directory and not a file hidden inside a verified tree.
 
 ```text
-src/scx_lachesis/
-  Cargo.toml       workspace root and the `scx_lachesis` binary package
-  Cargo.lock       committed
-  Makefile         PROG, SRC, KEEP_SYMS, USER_MANIFEST, USER_CORE_SRC
-  bpf/main.rs      the BPF policy; verified, compiled by rules.mk
-  src/main.rs      the loader; unverified, compiled by cargo
-  core/            `scx_lachesis_core`, verified, compiled by both
-  vm-run.sh vm-guest.sh
+src/
+  runtime/         lachesis_runtime; substrate, verified
+    trusted/       lachesis_runtime_trusted; assumed, `unsafe` lives here
+  sched/           one scheduler
+    Makefile       PROG, SRC, KEEP_SYMS, USER_MANIFEST, USER_CORE_*
+    bpf/main.rs    the BPF policy; verified, compiled by rules.mk
+    control/       lachesis_control; verified, compiled by both
+    vm-run.sh vm-guest.sh
+  loader/          the `lachesis` binary; unverified, compiled by cargo
+    Cargo.toml Cargo.lock main.rs
+  toolchain/       the pipeline
 ```
 
+A build leaves one artefact at the repository root: `./lachesis`, a
+symlink to `build/lachesis/lachesis`. The loader resolves its default
+`--obj` through `/proc/self/exe`, which follows the link, so the object it
+loads is still the one beside the real binary.
+
 A program directory owns only its sources and a Makefile that sets `PROG`,
-optionally `SRC`, `KEEP_SYMS`, `USER_MANIFEST` and `USER_CORE_SRC`, and then
+optionally `SRC`, `KEEP_SYMS` and the three userspace variables, and then
 includes the pipeline:
 
 ```make
-PROG := scx_lachesis
+PROG := lachesis
 SRC := bpf/main.rs
 KEEP_SYMS := lachesis_ops lachesis_enqueue ... LACHESIS _LICENSE
-USER_MANIFEST := Cargo.toml
-USER_CORE_SRC := core/src/lib.rs
+USER_MANIFEST := ../loader/Cargo.toml
+USER_CORE_SRC := control/src/lib.rs
+USER_CORE_NAME := lachesis_control
 include ../toolchain/rules.mk
 ```
 
@@ -78,16 +96,16 @@ directory. `KEEP_SYMS` is what `opt` may not internalize: the struct_ops
 map, its entry points, the license, and anything userspace reads back out
 of the maps, which today means the policy's own static. Set
 `USER_MANIFEST` and the pipeline also builds a binary named `$(PROG)` out
-of that cargo project; set `USER_CORE_SRC` and it also verifies that crate
-with `--no-cheating`. Nothing else about the pipeline belongs in a
-program's Makefile.
+of that cargo project; set `USER_CORE_SRC` and `USER_CORE_NAME` and it
+also verifies that crate with `--no-cheating`. Nothing else about the
+pipeline belongs in a program's Makefile.
 
 ## Writing a policy
 
 A policy file is policy. It contains no `unsafe`, no `extern`, no
 `#[link_section]`, no `#[no_mangle]`, no raw pointers, no `#[btf]` and no
-`repr(C)`; `src/scx_lachesis/bpf/main.rs` is the worked example and is just
-over a hundred lines. `use lachesis_rt::prelude::*;` brings in
+`repr(C)`; `src/sched/bpf/main.rs` is the worked example and is just
+over a hundred lines. `use lachesis_runtime::prelude::*;` brings in
 everything, including the `verus!` macro.
 
 The state is a struct and the callbacks are an `impl Policy`, both inside
@@ -115,7 +133,7 @@ impl Policy for Lachesis {
 } // verus!
 ```
 
-The `Policy` trait in `src/rt/policy.rs` declares every struct_ops member a
+The `Policy` trait in `src/runtime/policy.rs` declares every struct_ops member a
 policy may implement, one method per callback, each with a default body, so
 a policy writes only the callbacks it cares about. Contracts are declared
 on the trait and inherited by the `impl`: Verus rejects a `requires` on a
@@ -162,8 +180,8 @@ policy, its type, and a `const` initializer. The static is emitted outside
 <first 8 chars of the object>.bss` prints the whole of it, counters
 included. Each `ops` line is "struct_ops member `as` exported program
 symbol" and nothing more -- the trait fixes the signature, and
-`__trampoline!` in `src/trusted/ops.rs` has one rule per member name that
-knows the context layout. Two names per line is the floor, because
+`__trampoline!` in `src/runtime/trusted/ops.rs` has one rule per member
+name that knows the context layout. Two names per line is the floor, because
 `macro_rules!` cannot mint an identifier. `sleepable` members get a
 `struct_ops.s/` section, which the kernel requires for `init`, `init_task`,
 `exit_task` and the cgroup callbacks. Counter slots are plain `usize`
@@ -172,14 +190,15 @@ index to be in range and Verus checks it.
 
 Adding a struct_ops member means adding a method to the `Policy` trait and
 a rule to `__trampoline!`; an unknown member is a `compile_error!`. A
-kernel function a policy needs is declared in `src/trusted/kfunc.rs`, given
-a safe wrapper in `src/trusted/scx.rs`, and given its specification on that
-wrapper. Never in `lachesis_rt`, never in a policy, and never a second
-`extern` block anywhere.
+kernel function a policy needs is declared in
+`src/runtime/trusted/kfunc.rs`, given a safe wrapper in
+`src/runtime/trusted/scx.rs`, and given its specification on that
+wrapper. Never in `lachesis_runtime`, never in a policy, and never a
+second `extern` block anywhere.
 
 ## The userspace side
 
-`scx_lachesis` is a binary now, not a `bpftool struct_ops register`
+`lachesis` is a binary now, not a `bpftool struct_ops register`
 invocation. It exists because the link has to be *held*: dropping it
 unregisters the scheduler, which is how a dead loader stops being a wedged
 machine, and it is the only way to read back the exit information the
@@ -187,36 +206,44 @@ kernel reports through `ops.exit`.
 
 Three pieces, and the split between them is the point:
 
-- `src/main.rs`, the loader. Argument parsing, libbpf-rs, `.bss` decoding,
-  signals, printing. **Not verified**, and not going to be: its dependency
-  graph is libbpf-rs and libc, which Verus has no specifications for, and
-  its job is I/O. `unsafe` is allowed here, and `lint-trusted` exempts this
-  one directory from the `unsafe` half of the lint for exactly that reason
-  (it still applies the cheat half). `make verify` prints its line count
-  next to the BPF trusted base, so the size of what nothing checks stays
-  visible.
-- `core/`, the crate `scx_lachesis_core`. **Verified**, `#![no_std]`,
-  everything inside `verus!`, checked with `--no-cheating`. It is a crate
-  and not a module because Verus verifies crates: keeping it separate is
-  what lets it be checked without libbpf-rs in the pass. It therefore
-  depends on nothing but the `verus!` macro, taken as a path dependency on
-  `dep/verus`.
-- `bpf/main.rs`, the policy, unchanged in kind: still the BPF side.
+- `src/loader/main.rs`, the loader. Argument parsing, libbpf-rs, `.bss`
+  decoding, signals, printing. **Not verified**, and not going to be: its
+  dependency graph is libbpf-rs and libc, which Verus has no
+  specifications for, and its job is I/O. `unsafe` is allowed here, and
+  `lint-trusted` exempts this one directory from the `unsafe` half of the
+  lint for exactly that reason (it still applies the cheat half). `make
+  verify` prints its line count next to the BPF trusted base, so the size
+  of what nothing checks stays visible.
+- `src/sched/control/`, the crate `lachesis_control`. **Verified**,
+  `#![no_std]`, everything inside `verus!`, checked with `--no-cheating`.
+  It is a crate and not a module because Verus verifies crates: keeping it
+  separate is what lets it be checked without libbpf-rs in the pass. It
+  therefore depends on nothing but the `verus!` macro, taken as a path
+  dependency on `dep/verus`. It lives with the policy, not with the
+  loader, because what it is for is being checked in the same pass as the
+  BPF side it reads.
+- `src/sched/bpf/main.rs`, the policy, unchanged in kind: still the BPF
+  side.
 
-Adding a function to the core: write it inside the `verus!` block with a
-`requires`/`ensures` that says something a caller could get wrong, call it
-from `src/main.rs`, and re-run `make verify`. There is no wiring to do --
-`USER_CORE_SRC` in the Makefile already points at the crate, `verify`
-reports it on its own line, and the object build depends on that pass like
-it does on the others.
+`lachesis_control` holds only what is worth proving. A function whose
+contract a reader would accept at a glance -- a name table, a wrapping
+subtraction, anything about formatting -- belongs in the loader, where the
+cost of reading it is nothing and the proof would say nothing. Today the
+crate is `classify_exit` and the `ExitClass` it returns, and that is the
+whole of it. Adding to it: write the function inside the `verus!` block
+with a `requires`/`ensures` that says something a caller could get wrong,
+call it from `src/loader/main.rs`, and re-run `make verify`. There is no
+wiring to do -- `USER_CORE_SRC` in the Makefile already points at the
+crate, `verify` reports it on its own line, and the object build depends
+on that pass like it does on the others.
 
 ### The binary
 
 ```
-scx_lachesis [--obj PATH] [--interval SECS] [--duration SECS] [--allow-host]
+lachesis [--obj PATH] [--interval SECS] [--duration SECS] [--allow-host]
 ```
 
-`--obj` defaults to `scx_lachesis.o` beside the executable; the object is
+`--obj` defaults to `lachesis.o` beside the executable; the object is
 loaded from a path rather than embedded, so the two builds stay
 independent. `--interval` is the stats period, `--duration` (default 5
 seconds) detaches and exits after that long; `--duration 0` runs until
@@ -239,9 +266,8 @@ are four nested single-field newtypes, so without that every counter would
 print as `LACHESIS.stats.counters[0].v.value.__0`. Three leaf names are
 special, matched on the last dotted component: `vtime_now` is printed as
 the clock, `exit_kind` and `exit_code` are the exit report. Everything else
-is a counter and its per-interval delta is printed, computed by
-`scx_lachesis_core::counter_deltas`. Adding a counter to the policy needs
-no change to the loader.
+is a counter and its per-interval delta is printed. Adding a counter to
+the policy needs no change to the loader.
 
 ### How the exit info flows
 
@@ -249,8 +275,9 @@ no change to the loader.
 handed, and it is gone by the time anything in userspace could look at it.
 So the BPF side copies the two fields that matter into its own static:
 
-1. `src/trusted/task.rs` declares a `#[btf]` view of `struct scx_exit_info`
-   with `kind` and `exit_code`, and two `external_body` accessors on
+1. `src/runtime/trusted/task.rs` declares a `#[btf]` view of `struct
+   scx_exit_info` with `kind` and `exit_code`, and two `external_body`
+   accessors on
    `ExitInfo` that read them through CO-RE relocated offsets. `kind`'s
    local type is a Rust `enum scx_exit_kind` mirroring the kernel's, not an
    `i32`: libbpf's CO-RE matching compares BTF *kinds*, so an integer
@@ -264,9 +291,12 @@ So the BPF side copies the two fields that matter into its own static:
    exits non-zero. Otherwise, on SIGINT, SIGTERM or `--duration`, it drops
    the link, waits for the kernel to call `ops.exit` with `SCX_EXIT_UNREG`
    from its disable kthread, reports, and exits zero.
-4. `scx_lachesis_core::classify_exit` turns the raw kind into the band it
-   belongs to and `exit_kind_name` gives it the kernel's own wording; the
-   classification is what decides the process exit status.
+4. `lachesis_control::classify_exit` turns the raw kind into the band it
+   belongs to, and that classification is what decides the process exit
+   status. It is the one judgement on the userspace side, which is why it
+   is the one thing over there that is verified; the loader's
+   `exit_kind_name` beside it is only the kernel's own wording for the
+   report.
 
 ## Submodules
 
@@ -291,23 +321,23 @@ So the BPF side copies the two fields that matter into its own static:
 ## Builds
 
 - Run `make help` for the target list and overridable variables instead of
-  relying on this file to enumerate them; `make -C src/scx_lachesis help` adds
+  relying on this file to enumerate them; `make -C src/sched help` adds
   the per-program toolchain variables.
 - `kdev` comes from the pinned `dep/kkd` submodule, not from a system install.
 - `make verus` builds the verifier out of `dep/verus` with vstd in
   `no_std`/`no_alloc` mode; it is a no-op once current and is a prerequisite
-  of `verify` and `scx-lachesis`. `make verus-clean` drops its outputs.
-- `make scx-lachesis` verifies and then builds both
-  `build/scx_lachesis/scx_lachesis.o` and the loader
-  `build/scx_lachesis/scx_lachesis`, `make scx-lachesis-run` boots a VM and
-  runs the loader as that guest's sched_ext scheduler, and
-  `make scx-lachesis-clean` removes `build/scx_lachesis/`. Nothing under
+  of `verify` and `lachesis`. `make verus-clean` drops its outputs.
+- `make lachesis` verifies and then builds both
+  `build/lachesis/lachesis.o` and the loader `build/lachesis/lachesis`,
+  and links the latter to `./lachesis`; `make lachesis-run` boots a VM and
+  runs the loader as that guest's sched_ext scheduler; `make
+  lachesis-clean` removes `build/lachesis/` and the symlink. Nothing under
   `build/` is tracked; `build/rust-deps` caches the libcore build and
   `build/host` every cargo output (`CARGO_TARGET_DIR`, including the
-  loader's), and both survive `scx-lachesis-clean` — use
-  `make -C src/scx_lachesis distclean` to drop them.
-- `make scx-lachesis-run` streams the guest transcript as it happens and
-  also writes it to `build/scx_lachesis/run.log`. `SCX_LACHESIS_SECS`
+  loader's), and both survive `lachesis-clean` — use
+  `make -C src/sched distclean` to drop them.
+- `make lachesis-run` streams the guest transcript as it happens and
+  also writes it to `build/lachesis/run.log`. `LACHESIS_SECS`
   (default 5) is how long the guest keeps the scheduler attached. Ctrl-C
   ends the run within about half a second and exits 130. `VM_TIMEOUT`
   (default 300) is the hard deadline for the whole run, enforced by a
@@ -320,7 +350,7 @@ So the BPF side copies the two fields that matter into its own static:
   allocation, back it with `bpf_arena` (see the roadmap), do not
   reintroduce a `#[global_allocator]` over out-of-tree kfuncs.
 - The toolchain is pinned by variables, not by `PATH`, all `?=` and all
-  listed by `make -C src/scx_lachesis help`: `RUST_TOOLCHAIN`, `RUSTC`,
+  listed by `make -C src/sched help`: `RUST_TOOLCHAIN`, `RUSTC`,
   `RUST_SRC`, `CARGO`, `LLVM_PREFIX`, `POSTPROC_FEATURES`, `PYTHON`,
   `BPFTOOL`, `BUILD_DIR`, `DEPDIR`, `HOSTDIR`, and `KERNEL_DIR` /
   `KERNEL_BUILD` / `VMLINUX`. rustc must not be newer than the LLVM tools:
@@ -342,49 +372,53 @@ So the BPF side copies the two fields that matter into its own static:
   by the `verus!` macro. `src/toolchain/README.md` has the details and the
   toolchain matrix; the short version is that `rustc` is Verus's pin and its
   LLVM must not be newer than the LLVM tools.
-- Three crates, in dependency order: `lachesis_trusted`, `lachesis_rt`,
-  then the policy. `make verify` (or `make -C src/scx_lachesis verify`) runs
-  Verus over each in turn and fails unless each reports `0 errors`; each
-  exports its proofs as a `.vir` that the next ones import. All three erased
-  compiles depend on all three passes, so `make scx-lachesis` verifies
-  before it compiles, and prints the trusted line count when it is done.
-- A fourth pass, `scx_lachesis_core`, runs beside them and is reported on
+- Three crates, in dependency order: `lachesis_runtime_trusted`,
+  `lachesis_runtime`, then the policy. `make verify` (or `make -C
+  src/sched verify`) runs Verus over each in turn and fails unless each
+  reports `0 errors`; each exports its proofs as a `.vir` that the next
+  ones import. All three erased compiles depend on all three passes, so
+  `make lachesis` verifies before it compiles, and prints the trusted line
+  count when it is done.
+- A fourth pass, `lachesis_control`, runs beside them and is reported on
   its own line. It is a leaf: it imports none of the other crates, so it
   names no rlibs and no search paths, and it runs with `--no-cheating`
-  unconditionally. The BPF object depends on it too, so a broken proof in
-  the userspace core stops the object build.
+  unconditionally. The BPF object depends on it too, so a broken proof on
+  the userspace side stops the object build.
 - `--no-cheating` is not the per-crate flag it looks like. Verus runs the
   check over the merged crate graph, so a crate that *calls* an
-  `external_body` function out of `lachesis_trusted` is rejected too, even
-  though the cheat is not its own. The flag is therefore on for
-  `lachesis_rt`, which calls none, and off for `lachesis_trusted` and for
-  the policy; `NOCHEAT_CRATES` in `rules.mk` is the list. `make
+  `external_body` function out of `lachesis_runtime_trusted` is rejected
+  too, even though the cheat is not its own. The flag is therefore on for
+  `lachesis_runtime`, which calls none, and off for
+  `lachesis_runtime_trusted` and for the policy; `NOCHEAT_CRATES` in
+  `rules.mk` is the list. `make
   lint-trusted` is what actually keeps cheats out of everything but
-  `src/trusted`, and it is a `verify` prerequisite.
+  `src/runtime/trusted`, and it is a `verify` prerequisite.
 - `VERIFY=0` skips verification and prints a warning on every build. It is
   for debugging the compile pipeline. Never load an object built that way,
   and never leave it set in a script.
 - No `assume(`, `admit(`, `external_body`, `assume_specification`,
   `external_fn_specification`, `#[verifier::external]` or `unsafe` may
-  appear anywhere under `src/` outside `src/trusted/`. Two exemptions, both
-  from the `unsafe` half only: `src/toolchain`, the imported compile
-  pipeline, trusted whole by roadmap section 3.7 item 5, and the loader's
-  own directory (`$(USER_MANIFEST)`'s `src/`), which is unverified by
-  design and needs `unsafe` to install a signal handler. `lint-trusted`
-  prints the exemption on every run. `make trusted-lines` prints `wc -l`
-  over `src/trusted/*.rs` and over the loader, and `verify` prints both at
-  the end, so the size of what nothing checks is visible on every run;
-  adding to it needs human review.
-- What is inside `verus!` and therefore checked: `src/rt` entirely, and in a
-  policy the state struct, the `impl Policy` and the `const`s. What is
-  outside it and unchecked: the kfunc externs, the `#[btf]` views, the
-  `Task` accessors, the atomics, the `scheduler!` trampolines, the
-  struct_ops table and the panic handler -- all of them in `src/trusted`,
-  and all of them with a specification that is assumed rather than proved.
+  appear anywhere under `src/` outside `src/runtime/trusted/`. Two
+  exemptions, both from the `unsafe` half only: `src/toolchain`, the
+  imported compile pipeline, trusted whole by roadmap section 3.7 item 5,
+  and `src/loader`, the directory holding the manifest `USER_MANIFEST`
+  names, which is unverified by design and needs `unsafe` to install a
+  signal handler. `lint-trusted` prints the exemption on every run. `make
+  trusted-lines` prints `wc -l` over `src/runtime/trusted/*.rs` and over
+  the loader, and `verify` prints both at the end, so the size of what
+  nothing checks is visible on every run; adding to it needs human
+  review.
+- What is inside `verus!` and therefore checked: `src/runtime` entirely,
+  `src/sched/control` entirely, and in a policy the state struct, the
+  `impl Policy` and the `const`s. What is outside it and unchecked: the
+  kfunc externs, the `#[btf]` views, the `Task` accessors, the atomics,
+  the `scheduler!` trampolines, the struct_ops table and the panic handler
+  -- all of them in `src/runtime/trusted`, and all of them with a
+  specification that is assumed rather than proved.
   A `requires` is therefore enforced at a call from a policy, and not at a
   call from a trampoline.
-- Raw `extern` and `unsafe` are expected in `src/trusted`; the lint is about
-  where they live, not about whether they exist.
+- Raw `extern` and `unsafe` are expected in `src/runtime/trusted`; the
+  lint is about where they live, not about whether they exist.
 
 ## sched_ext
 
@@ -392,7 +426,7 @@ So the BPF side copies the two fields that matter into its own static:
   the development host, and never write to `/sys/kernel/sched_ext` or
   `/sys/fs/bpf` there: the host runs its own scheduler and loading another
   displaces it. All loading happens inside the VM that
-  `make scx-lachesis-run` boots. Two guards, both on the DMI vendor:
+  `make lachesis-run` boots. Two guards, both on the DMI vendor:
   `vm-guest.sh` refuses to run anywhere that is not a QEMU guest, and the
   loader itself refuses to attach there unless given `--allow-host`. Never
   pass `--allow-host` on this machine.

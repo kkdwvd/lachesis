@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# scx_lachesis: the BPF policy and the loader that runs it. The pipeline
-# lives in ../toolchain/rules.mk; run `make help` for the variables it
-# exposes.
+# lachesis: the BPF policy and the userspace side that runs it. The
+# pipeline lives in ../toolchain/rules.mk; run `make help` for the
+# variables it exposes.
 
-PROG := scx_lachesis
+PROG := lachesis
 SRC := bpf/main.rs
 
 # Symbols opt must not internalize: the struct_ops map, its entry points,
@@ -17,9 +17,10 @@ KEEP_SYMS := lachesis_ops \
              LACHESIS \
              _LICENSE
 
-# The userspace side: a cargo workspace whose binary is `scx_lachesis` and
-# whose one verified crate is the core the binary calls.
-USER_MANIFEST := Cargo.toml
-USER_CORE_SRC := core/src/lib.rs
+# The userspace side: the unverified loader in ../loader, and the verified
+# control-plane crate beside this policy that it calls.
+USER_MANIFEST := ../loader/Cargo.toml
+USER_CORE_SRC := control/src/lib.rs
+USER_CORE_NAME := lachesis_control
 
 include ../toolchain/rules.mk

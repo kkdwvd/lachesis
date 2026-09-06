@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
-//! `lachesis_rt` -- the verified runtime substrate shared by every lachesis
+//! `lachesis_runtime` -- the verified substrate shared by every lachesis
 //! scheduler.
 //!
-//! This crate is the checked layer between `lachesis_trusted` and a policy.
-//! It contains no `unsafe`, no foreign declaration, no raw pointer and no
-//! Verus cheat, and it is verified with `--no-cheating`. What lives where:
+//! This crate is the checked layer between `lachesis_runtime_trusted` and
+//! a policy. It contains no `unsafe`, no foreign declaration, no raw
+//! pointer and no Verus cheat, and it is verified with `--no-cheating`.
+//! What lives where:
 //!
 //! * [`policy`] -- the [`policy::Policy`] trait: one method per struct_ops
 //!   callback, with the contracts a policy's `impl` inherits.
@@ -13,8 +14,8 @@
 //!
 //! Anything that needs an assumption -- a kfunc, a CO-RE field read, an
 //! atomic, the panic handler, the `scheduler!` trampolines -- lives in
-//! `lachesis_trusted` and is re-exported through the prelude, so a policy
-//! never names that crate.
+//! `lachesis_runtime_trusted` and is re-exported through the prelude, so a
+//! policy never names that crate.
 
 #![no_std]
 
@@ -26,7 +27,7 @@ pub mod prelude {
     // The `verus_keep_ghost` cfg dance, vstd, and the trusted surface:
     // `AtomicU64`, `ExitInfo`, `Stats`, `Task`, the `scx` wrappers and
     // their constants, and the `scheduler!` macro.
-    pub use lachesis_trusted::prelude::*;
+    pub use lachesis_runtime_trusted::prelude::*;
 
     pub use crate::policy::Policy;
     // Spec items are not re-exported: the `verus!` macro deletes them in the

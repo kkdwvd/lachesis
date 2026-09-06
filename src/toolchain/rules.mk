@@ -5,16 +5,17 @@
 # A scheduler directory's Makefile sets PROG (and optionally SRC, KEEP_SYMS
 # and the two userspace variables) and includes this file:
 #
-#	PROG := scx_lachesis
+#	PROG := lachesis
 #	SRC := bpf/main.rs
 #	KEEP_SYMS := lachesis_ops lachesis_enqueue ... _LICENSE
-#	USER_MANIFEST := Cargo.toml
-#	USER_CORE_SRC := core/src/lib.rs
+#	USER_MANIFEST := ../loader/Cargo.toml
+#	USER_CORE_SRC := control/src/lib.rs
+#	USER_CORE_NAME := lachesis_control
 #	include ../toolchain/rules.mk
 #
 # The pipeline, imported from 4ast/rust-bpf (see README.md):
 #
-#   verus src/trusted, src/rt, the policy, the userspace core   (proofs)
+#   verus the runtime, the policy, the control crate            (proofs)
 #   rustc --target bpfel-unknown-none-v4.json --emit=llvm-bc  (LLVM bitcode)
 #   llvm-link core + compiler_builtins + the lib crates + multi3
 #   bpf-postproc                                               (CO-RE relocs)
@@ -136,22 +137,22 @@ HOST_BTF_RLIB := $(HOST_DEPS)/libbtf.rlib
 
 # --- the library crates ----------------------------------------------------
 # An ordered list. Each crate is verified and compiled against the ones
-# before it, and the policy against all of them. src/trusted holds every
-# Verus cheat and every `unsafe` in the tree; src/rt is the checked layer
+# before it, and the policy against all of them. src/runtime/trusted holds every
+# Verus cheat and every `unsafe` in the tree; src/runtime is the checked layer
 # on top of it. Each is compiled twice, like a policy: verified on the
 # host, erased for BPF.
-LIB_CRATES := lachesis_trusted lachesis_rt
-lachesis_trusted_DIR ?= $(ROOT_DIR)/src/trusted
-lachesis_rt_DIR ?= $(ROOT_DIR)/src/rt
+LIB_CRATES := lachesis_runtime_trusted lachesis_runtime
+lachesis_runtime_trusted_DIR ?= $(ROOT_DIR)/src/runtime/trusted
+lachesis_runtime_DIR ?= $(ROOT_DIR)/src/runtime
 
 # --no-cheating is not the per-crate property it looks like: Verus runs the
 # check over the merged crate graph, so a crate that *calls* an
-# external_body function out of lachesis_trusted is rejected too, even
+# external_body function out of lachesis_runtime_trusted is rejected too, even
 # though the cheat is not its own. The flag is therefore set on every crate
 # that does not, and `lint-trusted` is what keeps cheats out of the rest.
 # See README.md, "Three crates". A policy joins the list under its PROG
 # name once it stops calling anything trusted directly.
-NOCHEAT_CRATES := lachesis_rt
+NOCHEAT_CRATES := lachesis_runtime
 nocheat = $(if $(filter $(1),$(NOCHEAT_CRATES)),--no-cheating)
 
 HOST_VERUS_DIR := $(HOSTDIR)/verus
@@ -187,8 +188,9 @@ VERUS_ERASE_FLAGS := --extern verus_builtin_macros=$(VERUS_MACROS_SO) \
 	--check-cfg 'cfg(verus_keep_ghost_body)'
 
 # Where rustc looks for a dependency's own dependencies. `--extern` covers
-# a crate's *direct* dependencies only; loading lachesis_rt's metadata makes
-# rustc resolve lachesis_trusted, and loading that one makes it resolve
+# a crate's *direct* dependencies only; loading lachesis_runtime's metadata
+# makes rustc resolve lachesis_runtime_trusted, and loading that one makes
+# it resolve
 # `btf`, `btf_macros` and `verus_builtin_macros`, all by search path. The
 # proc-macro has to be found under the hashed filename cargo gave it, which
 # is why BTF_MACROS_DEPS and not just BTF_MACROS_SO.
@@ -208,14 +210,14 @@ INTERNALIZE := $(foreach s,$(KEEP_SYMS),--internalize-public-api-list=$(s))
 # --- the userspace side ----------------------------------------------------
 # Optional, and driven entirely by two paths a program directory sets, both
 # relative to it: USER_MANIFEST, a Cargo.toml whose binary is named $(PROG),
-# and USER_CORE_SRC, the lib.rs of that project's verified core crate. Set
-# neither and nothing below happens; the BPF object is still the default
-# goal either way.
+# and USER_CORE_SRC, the lib.rs of the verified crate that binary calls,
+# whose name is USER_CORE_NAME. Set neither and nothing below happens; the
+# BPF object is still the default goal either way.
 #
 # The split is the point: the binary is ordinary std Rust with a
-# dependency graph Verus never sees, so it is not verified, while the core
-# is pure logic in its own crate and is verified exactly like a library
-# crate here -- with --no-cheating, since it calls nothing trusted.
+# dependency graph Verus never sees, so it is not verified, while the crate
+# beside it is pure logic and is verified exactly like a library crate here
+# -- with --no-cheating, since it calls nothing trusted.
 USER_MANIFEST ?=
 USER_CORE_SRC ?=
 USER_CORE_NAME ?= $(PROG)_core
@@ -322,8 +324,9 @@ $(HOST_BTF_RLIB): $(BTF_CRATE)
 
 # --- trusted-base lint ---
 # The roadmap makes a trusted/ directory the only place a proof may be
-# short-circuited, and src/trusted is the only one. Nothing else in src/ may
-# assume, admit, hand Verus a body it does not check, or write `unsafe`.
+# short-circuited, and src/runtime/trusted is the only one. Nothing else in
+# src/ may assume, admit, hand Verus a body it does not check, or write
+# `unsafe`.
 # src/toolchain is excluded: it is the imported compile pipeline, already
 # trusted as a whole by roadmap section 3.7 item 5.
 LINT_SRC := $(ROOT_DIR)/src
@@ -334,11 +337,11 @@ LINT_SKIP := /trusted/ /toolchain/
 # parsing, libbpf-rs, signals and printing. `unsafe` there is expected --
 # installing a signal handler needs it -- so the directory holding the
 # binary's own sources is exempt from the unsafe half of the lint, the way
-# src/trusted and src/toolchain are. Nothing else in the cargo project is:
-# the verified core beside it is checked like any other crate, and the
-# cheat half of the lint still covers the loader, where a Verus escape
-# hatch would make no sense at all.
-LINT_UNSAFE_SKIP = $(if $(USER_MANIFEST),$(USER_DIR)src/)
+# src/runtime/trusted and src/toolchain are. Nothing else is: the verified
+# crate it calls is checked like any other, and the cheat half of the lint
+# still covers the loader, where a Verus escape hatch would make no sense
+# at all.
+LINT_UNSAFE_SKIP = $(if $(USER_MANIFEST),$(USER_DIR))
 
 # $(call lint_forbid,<regex>,<what>[,<extra skip patterns>]). Skips
 # LINT_SKIP, and skips whole-line comments so that prose about the rule
@@ -348,7 +351,7 @@ define lint_forbid
 		grep -v $(foreach p,$(LINT_SKIP) $(3),-e '$(p)') | \
 		grep -vE ':[0-9]+:[[:space:]]*(//|\*)' || true); \
 	if [[ -n "$$hits" ]]; then \
-		echo "lint-trusted: $(2) outside src/trusted/:" >&2; \
+		echo "lint-trusted: $(2) outside src/runtime/trusted/:" >&2; \
 		echo "$$hits" >&2; \
 		exit 1; \
 	fi
@@ -363,8 +366,8 @@ lint-trusted:
 # visible on every run (roadmap section 3.7): the BPF trusted base, and
 # next to it the loader.
 trusted-lines:
-	@wc -l $(lachesis_trusted_DIR)/*.rs | sed 's|$(ROOT_DIR)/||'
-	@$(if $(USER_MANIFEST),wc -l $(USER_DIR)src/*.rs | sed 's|$(ROOT_DIR)/||')
+	@wc -l $(lachesis_runtime_trusted_DIR)/*.rs | sed 's|$(ROOT_DIR)/||'
+	@$(if $(USER_MANIFEST),wc -l $(USER_DIR)*.rs | sed 's|$(ROOT_DIR)/||')
 
 # --- verification and the erased compile, per library crate ---
 # One template, applied to LIB_CRATES in order.
@@ -416,11 +419,11 @@ endef
 
 $(foreach c,$(LIB_CRATES),$(eval $(call lib_crate_rules,$(c))))
 
-# --- verification, the userspace core ---
+# --- verification, the crate the loader calls ---
 # A crate of its own, and a leaf: it imports none of the BPF crates and
 # depends on nothing but the `verus!` macro, so its pass names no rlibs and
-# no search paths. --no-cheating is unconditional here; a core that needs a
-# cheat is a core that has stopped being pure logic.
+# no search paths. --no-cheating is unconditional here; a crate that needs
+# a cheat is one that has stopped being pure logic.
 ifneq ($(strip $(USER_CORE_SRC)),)
 $(USER_CORE_STAMP): $(USER_CORE_SRCS) $(VERUS) | lint-trusted
 	@mkdir -p $(OUT)
@@ -444,11 +447,11 @@ $(OUT)/verify.stamp: $(SRC) $(LIB_VIRS) $(LIB_HOST_RLIBS) $(HOST_BTF_RLIB) \
 	@touch $@
 
 verify: $(OUT)/verify.stamp $(if $(USER_CORE_SRC),$(USER_CORE_STAMP))
-	@$(foreach c,$(LIB_CRATES),printf '%-18s %s\n' '$(c)' \
+	@$(foreach c,$(LIB_CRATES),printf '%-24s %s\n' '$(c)' \
 		"$$(grep -E '^verification results::' $($(c)_LOG))";)
-	@printf '%-18s %s\n' '$(PROG)' \
+	@printf '%-24s %s\n' '$(PROG)' \
 		"$$(grep -E '^verification results::' $(OUT)/verify.log)"
-	@$(if $(USER_CORE_SRC),printf '%-18s %s\n' '$(USER_CORE_NAME)' \
+	@$(if $(USER_CORE_SRC),printf '%-24s %s\n' '$(USER_CORE_NAME)' \
 		"$$(grep -E '^verification results::' $(USER_CORE_LOG))")
 	@$(MAKE) --no-print-directory trusted-lines
 
@@ -529,12 +532,12 @@ $(OUT)/$(PROG).o: $(OUT)/$(PROG)-ksyms.bc
 # otherwise resolve `rustc` through the rustup shim, which picks a toolchain
 # from the *callee's* directory and would build the path dependencies on
 # dep/verus with Verus's pin and the registry crates with the default
-# toolchain, which then refuse to link. The verified core is a member of the
-# same cargo workspace and is compiled here with ghost code erased, exactly
-# like the BPF crates: this cargo run does not set `verus_keep_ghost`.
+# toolchain, which then refuse to link. The verified crate it depends on is
+# built by this same cargo run with ghost code erased, exactly like the BPF
+# crates: nothing here sets `verus_keep_ghost`.
 ifneq ($(strip $(USER_MANIFEST)),)
 $(USER_BIN): $(wildcard $(USER_DIR)Cargo.toml $(USER_DIR)Cargo.lock \
-		$(USER_DIR)src/*.rs) $(USER_CORE_SRCS) \
+		$(USER_DIR)*.rs) $(USER_CORE_SRCS) \
 		$(wildcard $(dir $(USER_CORE_SRC))../Cargo.toml) $(USER_CORE_DEP)
 	@mkdir -p $(OUT)
 	CARGO_TARGET_DIR=$(USER_TARGET_DIR) RUSTC=$(RUSTC) \
@@ -607,7 +610,7 @@ help:
 		'Targets:' \
 		'  all           Verify, then build $$(OUT)/$$(PROG).o and the loader' \
 		'  verify        Run Verus over $$(LIB_CRATES) and $$(SRC)' \
-		'  lint-trusted  Forbid cheats and unsafe outside src/trusted/' \
+		'  lint-trusted  Forbid cheats and unsafe outside src/runtime/trusted/' \
 		'  trusted-lines Print the size of the trusted base' \
 		'  rust-project  Write $$(RUST_PROJECT_JSON) for rust-analyzer' \
 		'  clean         Remove the per-program build directory' \

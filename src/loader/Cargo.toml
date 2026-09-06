@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# The unverified userspace side of lachesis: the loader binary, and a path
+# dependency on the verified control-plane crate that lives with the policy
+# it loads. The BPF object is not built by cargo -- it comes out of
+# ../toolchain/rules.mk -- and is loaded from a path beside the binary
+# rather than embedded, so the two builds stay independent.
+
+[package]
+name = "lachesis"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+publish = false
+
+# A workspace of one: cargo requires every member to sit below the
+# workspace root, and lachesis_control lives with the policy it is verified
+# beside, not with the binary that calls it. It is an ordinary path
+# dependency instead, which builds it the same way and keeps this
+# directory's Cargo.lock the only one.
+[workspace]
+
+[[bin]]
+name = "lachesis"
+path = "main.rs"
+
+[dependencies]
+lachesis_control = { path = "../sched/control" }
+# Default features build libbpf from libbpf-sys's bundled sources and link
+# it statically, against the system libelf and zlib.
+libbpf-rs = "0.27"
+# Signal handling, and nothing else.
+libc = "0.2"

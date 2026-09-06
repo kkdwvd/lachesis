@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Guest side of `make scx-lachesis-run`: run the scx_lachesis loader as the
+# Guest side of `make lachesis-run`: run the lachesis loader as the
 # machine's sched_ext scheduler, put a workload under it, print the evidence
 # and let it detach again.
 #
@@ -88,10 +88,10 @@ for _ in 1 2 3 4; do
 	timeout "$SECS" sh -c 'while :; do sleep 0.01; done' &
 done
 
-hdr "run: scx_lachesis --duration $SECS --interval 1"
+hdr "run: lachesis --duration $SECS --interval 1"
 "$BIN" --obj "$OBJ" --duration "$SECS" --interval 1
 rc=$?
-echo "scx_lachesis rc=$rc"
+echo "lachesis rc=$rc"
 wait
 
 hdr "sched_ext while it ran"
@@ -111,6 +111,6 @@ state=$(cat "$SCX/state")
 if ((rc == 0)) && [[ "$state" == disabled ]]; then
 	echo "OK: scheduler attached, ran the workload and detached cleanly"
 else
-	echo "FAIL: scx_lachesis rc=$rc, sched_ext state is $state after detach"
+	echo "FAIL: lachesis rc=$rc, sched_ext state is $state after detach"
 	exit 1
 fi

@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Host side of `make scx-lachesis-run`: boot the target kernel under
+# Host side of `make lachesis-run`: boot the target kernel under
 # virtme-ng and hand vm-guest.sh the loader and the object it loads.
 #
 # The scheduler is only ever loaded inside the guest; nothing here touches
@@ -29,8 +29,8 @@ VM_MEM=${VM_MEM:-2G}
 # ejects a stalled scheduler long before this fires.
 VM_TIMEOUT=${VM_TIMEOUT:-300}
 
-[[ -x "$BIN" ]] || { echo "no loader at $BIN; run 'make scx-lachesis' first" >&2; exit 1; }
-[[ -f "$OBJ" ]] || { echo "no object at $OBJ; run 'make scx-lachesis' first" >&2; exit 1; }
+[[ -x "$BIN" ]] || { echo "no loader at $BIN; run 'make lachesis' first" >&2; exit 1; }
+[[ -f "$OBJ" ]] || { echo "no object at $OBJ; run 'make lachesis' first" >&2; exit 1; }
 [[ -d "$KERNEL" || -f "$KERNEL" ]] || { echo "no kernel at $KERNEL" >&2; exit 1; }
 command -v "$VNG" >/dev/null || { echo "virtme-ng ($VNG) not found" >&2; exit 1; }
 
@@ -43,7 +43,7 @@ mkdir -p "$OUTDIR"
 # never backgrounds the pipeline below or turns on job control. So the whole
 # tree -- this script, vng, tee, virtme-run and qemu -- shares one process
 # group: whatever the terminal's foreground group was when
-# `make scx-lachesis-run` started. A Ctrl-C is delivered by the tty driver to
+# `make lachesis-run` started. A Ctrl-C is delivered by the tty driver to
 # that group, so it reaches every one of them at once, and that is most of
 # what makes a run interruptible.
 #
@@ -232,4 +232,4 @@ if ! grep -q '^OK: scheduler attached' "$LOG"; then
 	echo "guest run did not report success; see $LOG" >&2
 	exit 1
 fi
-echo "scx_lachesis ran as the guest's sched_ext scheduler; transcript in $LOG"
+echo "lachesis ran as the guest's sched_ext scheduler; transcript in $LOG"

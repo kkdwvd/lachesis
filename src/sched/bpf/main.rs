@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// scx_lachesis: a virtual-time scheduler over one shared DSQ.
+// lachesis: a virtual-time scheduler over one shared DSQ.
 //
 // Policy only. Every kfunc binding, kernel view, atomic, trampoline,
-// section name and the panic handler live in lachesis_trusted; the
-// contracts the callbacks below are checked against live in lachesis_rt's
+// section name and the panic handler live in lachesis_runtime_trusted; the
+// contracts the callbacks below are checked against live in lachesis_runtime's
 // Policy trait. What is left here is the scheduling decisions, and Verus
 // checks them: the impl is inside verus! and inherits the trait's
 // contracts, so calling charge_vtime with a weight that could be zero is a
@@ -16,7 +16,7 @@
 #![no_std]
 #![no_main]
 
-use lachesis_rt::prelude::*;
+use lachesis_runtime::prelude::*;
 
 verus! {
 

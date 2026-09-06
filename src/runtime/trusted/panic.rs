@@ -2,7 +2,7 @@
 //! The panic handler.
 //!
 //! A `#[panic_handler]` may live in a dependency crate, so neither
-//! `lachesis_rt` nor a policy defines one; it is here once for every
+//! `lachesis_runtime` nor a policy defines one; it is here once for every
 //! scheduler. Nothing about it is checkable, which is why it is trusted.
 
 use crate::kfunc;

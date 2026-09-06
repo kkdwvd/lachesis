@@ -8,4 +8,4 @@
 #
 # rust-project.json is generated and gitignored, so this file points at
 # something that does not exist until `make rust-project` has run once.
-linkedProjects = ["rust-project.json", "src/scx_lachesis/Cargo.toml"]
+linkedProjects = ["rust-project.json", "src/loader/Cargo.toml"]

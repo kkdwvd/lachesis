@@ -15,21 +15,27 @@ VERUS_REBASE_REMOTE ?= origin
 VERUS_REBASE_BRANCH ?= main
 VERUS_REBASE_URL ?=
 
-# --- scx_lachesis: the Rust sched_ext scheduler, built through src/toolchain ---
+# --- lachesis: the Rust sched_ext scheduler, built through src/toolchain ---
 BUILD_DIR ?= $(ROOT_DIR)/build
-SCX_LACHESIS_DIR ?= $(ROOT_DIR)/src/scx_lachesis
-SCX_LACHESIS_OUT ?= $(BUILD_DIR)/scx_lachesis
-SCX_LACHESIS_OBJ ?= $(SCX_LACHESIS_OUT)/scx_lachesis.o
-SCX_LACHESIS_BIN ?= $(SCX_LACHESIS_OUT)/scx_lachesis
+LACHESIS_DIR ?= $(ROOT_DIR)/src/sched
+LACHESIS_OUT ?= $(BUILD_DIR)/lachesis
+LACHESIS_OBJ ?= $(LACHESIS_OUT)/lachesis.o
+LACHESIS_BIN ?= $(LACHESIS_OUT)/lachesis
+# The one thing a build leaves at the repository root: a symlink to the
+# loader, so `./lachesis` is the way to run it. It has to be a link and not
+# a copy, because the loader resolves its default --obj through
+# /proc/self/exe, which follows the link back to the object beside it.
+LACHESIS_LINK ?= $(ROOT_DIR)/lachesis
+LACHESIS_LINK_TARGET = $(patsubst $(ROOT_DIR)/%,%,$(LACHESIS_BIN))
 # Kernel the object is built against and run on. It must have
 # CONFIG_SCHED_CLASS_EXT=y and BTF, and its vmlinux is what add_ksyms.py
 # mirrors kfunc prototypes from.
 KERNEL_DIR ?= /home/kkd/src/linux
 KERNEL_BUILD ?= $(KERNEL_DIR)/.kdev/build/kernel
 # Seconds of workload to run under the scheduler in the guest.
-SCX_LACHESIS_SECS ?= 5
+LACHESIS_SECS ?= 5
 
-SCX_LACHESIS_MAKE = $(MAKE) -C $(SCX_LACHESIS_DIR) \
+LACHESIS_MAKE = $(MAKE) -C $(LACHESIS_DIR) \
 	BUILD_DIR=$(BUILD_DIR) KERNEL_DIR=$(KERNEL_DIR) \
 	KERNEL_BUILD=$(KERNEL_BUILD) VERUS_DIR=$(VERUS_DIR)
 
@@ -50,7 +56,7 @@ VERUS_Z3_WHEEL ?= https://github.com/Z3Prover/z3/releases/download/z3-$(VERUS_Z3
 	kkd-sync verus-sync all-sync sync \
 	kkd-rebase verus-rebase all-rebase rebase \
 	verus verus-clean \
-	verify scx-lachesis scx-lachesis-run scx-lachesis-clean rust-project
+	verify lachesis lachesis-run lachesis-clean rust-project
 
 .NOTPARALLEL: all-sync
 
@@ -127,10 +133,10 @@ help:
 		'  rebase             Alias for all-rebase' \
 		'  verus              Build Verus from dep/verus (vstd no_std, no_alloc)' \
 		'  verus-clean        Remove the Verus build outputs' \
-		'  verify             Verus over src/trusted, src/rt, the policy and the core' \
-		'  scx-lachesis       Verify, then build the BPF object and the loader' \
-		'  scx-lachesis-run   Boot a VM, run the loader as its sched_ext scheduler' \
-		'  scx-lachesis-clean Remove the scx_lachesis build outputs' \
+		'  verify             Verus over every crate: runtime, policy, control' \
+		'  lachesis           Verify and build; links ./lachesis to the loader' \
+		'  lachesis-run       Boot a VM, run the loader as its scheduler' \
+		'  lachesis-clean     Remove the lachesis build outputs' \
 		'  rust-project       Write rust-project.json for rust-analyzer' \
 		'' \
 		'Useful overrides:' \
@@ -140,9 +146,9 @@ help:
 		'  BUILD_DIR=$(BUILD_DIR)' \
 		'  KERNEL_DIR=$(KERNEL_DIR)' \
 		'  KERNEL_BUILD=$(KERNEL_BUILD)' \
-		'  SCX_LACHESIS_SECS=$(SCX_LACHESIS_SECS) (default: 5) seconds of guest workload' \
-		'  VM_CPUS/VM_MEM/VM_TIMEOUT for scx-lachesis-run' \
-		"  'make -C src/scx_lachesis help' for the toolchain variables"
+		'  LACHESIS_SECS=$(LACHESIS_SECS) (default: 5) seconds of guest workload' \
+		'  VM_CPUS/VM_MEM/VM_TIMEOUT for lachesis-run' \
+		"  'make -C src/sched help' for the toolchain variables"
 
 kkd-sync:
 	$(call sync_repo,$(KKD_DIR),kkd)
@@ -174,9 +180,9 @@ all-rebase:
 
 rebase: all-rebase
 
-# --- scx_lachesis -------------------------------------------------------
+# --- lachesis -------------------------------------------------------
 # Building runs entirely on the host; loading only ever happens inside the
-# guest that scx-lachesis-run boots. Never register a sched_ext scheduler on
+# guest that lachesis-run boots. Never register a sched_ext scheduler on
 # the development host: it would displace the one the host is running. The
 # loader refuses to attach outside a QEMU guest for the same reason, and
 # `make` never passes it the --allow-host override.
@@ -213,20 +219,23 @@ verus-clean:
 		$(VERUS_DIR)/tools/vargo/target
 
 verify: verus
-	$(SCX_LACHESIS_MAKE) verify
+	$(LACHESIS_MAKE) verify
 
-scx-lachesis: verus
-	$(SCX_LACHESIS_MAKE)
+lachesis: verus
+	$(LACHESIS_MAKE)
+	@ln -sfn $(LACHESIS_LINK_TARGET) $(LACHESIS_LINK)
+	@echo "./lachesis -> $(LACHESIS_LINK_TARGET)"
 
-scx-lachesis-run: scx-lachesis
-	$(SCX_LACHESIS_DIR)/vm-run.sh $(SCX_LACHESIS_BIN) $(SCX_LACHESIS_OBJ) \
-		$(KERNEL_BUILD) $(SCX_LACHESIS_OUT) $(SCX_LACHESIS_SECS)
+lachesis-run: lachesis
+	$(LACHESIS_DIR)/vm-run.sh $(LACHESIS_BIN) $(LACHESIS_OBJ) \
+		$(KERNEL_BUILD) $(LACHESIS_OUT) $(LACHESIS_SECS)
 
-scx-lachesis-clean:
-	$(SCX_LACHESIS_MAKE) clean
+lachesis-clean:
+	$(LACHESIS_MAKE) clean
+	@rm -f $(LACHESIS_LINK)
 
 # rust-analyzer has no Cargo workspace to read; this writes the equivalent
 # project file by hand. See src/toolchain/rules.mk and README.md, "Editor
 # support".
 rust-project:
-	$(SCX_LACHESIS_MAKE) rust-project
+	$(LACHESIS_MAKE) rust-project
