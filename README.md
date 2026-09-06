@@ -1,55 +1,43 @@
 # Lachesis
 
-<table>
-  <tr>
-    <td width="240" valign="top" align="left">
-      <img src="docs/assets/lachesis.png" width="220" alt="Lachesis holding a spindle and a thread">
-    </td>
-    <td valign="top">
-      <p><strong>Every thread deserves its time.</strong></p>
-      <p>
-        Named for the Fate who measures the thread of life, Lachesis explores
-        how we give threads their share of a machine. It is a framework for
-        building Linux CPU schedulers in Rust, checking their contracts with
-        Verus, and compiling them to eBPF to run under sched_ext.
-      </p>
-      <p>
-        A scheduler's promises unfold over time: runnable tasks make progress,
-        available CPUs do useful work, and competing workloads receive their
-        fair share. Lachesis aims to make those promises precise and prove
-        that they survive the interaction of concurrent callbacks with the
-        kernel.
-      </p>
-      <p>
-        The design keeps scheduling decisions readable, puts reusable
-        contracts beneath them, and makes the trusted boundary explicit.
-        The ambition is practical: schedulers whose behavior we can explain,
-        verify, and eventually trust in production.
-      </p>
-    </td>
-  </tr>
-</table>
+<img align="left" src="docs/assets/lachesis.png" width="200" alt="Lachesis holding a spindle and a thread">
 
-## Where it stands
+**A measured share of time for every thread.**
+
+In Greek mythology, Lachesis is the Fate who measures the thread of life and
+allots each person their share. A CPU scheduler holds a similar responsibility:
+it apportions a finite supply of time among competing threads, and its
+choices determine which work can make progress. Lachesis takes its name from
+that act of measurement and allocation, and asks what it would take to make
+those choices carry a proof.
+
+The goal is a practical, formally verified Linux CPU scheduler: one that gives
+runnable threads their turn, keeps available CPUs working, and bounds how far
+a workload can fall behind its rightful share. Those promises must hold across
+concurrent callbacks, changing demand, and the kernel's own scheduling
+machinery. Fairness is a property of the execution over time, so that is where
+the proofs must reach.
+
+Lachesis brings together Rust, Verus, and sched_ext to pursue that goal.
+Policies compile to eBPF, with reusable contracts and proof machinery beneath
+them and an explicit trusted boundary around their interaction with the
+kernel. The ambition is to make rigorous guarantees part of writing a
+scheduler, and to deliver them at the performance and scale production
+workloads demand.
+
+<br clear="all">
+
+## Summary
 
 Lachesis is an early research prototype. The current scheduler uses a shared
 queue ordered by virtual time, with a direct path to idle CPUs. The build
-checks the policy, runtime, and userspace core with Verus before compiling
+checks the policy, runtime, and userspace control crate with Verus before compiling
 the BPF object and loader.
 
 These checks establish the contracts written in the code. Whole-scheduler
 proofs of starvation freedom, work conservation, and bounded fairness remain
 goals. Kernel bindings and their assumed contracts live in an explicit trusted
 base; the loader and compilation pipeline are also outside the proofs.
-
-## Explore the code
-
-- [Scheduling policy](src/scx_lachesis/bpf/main.rs): the scheduling decisions.
-- [Checked runtime](src/rt): callback contracts and virtual-time arithmetic.
-- [Trusted base](src/trusted): kernel bindings, task views, and trampolines.
-- [Userspace core](src/scx_lachesis/core): verified helpers for the loader.
-- [Toolchain](src/toolchain/README.md): build requirements, provenance, and
-  verification boundaries.
 
 ## Build and run
 
@@ -59,15 +47,15 @@ Initialize the pinned dependencies, then consult the build targets and
 ```sh
 git submodule update --init
 make help
-make -C src/scx_lachesis help
+make -C src/sched help
 ```
 
 With the toolchain and a sched_ext-enabled kernel build available:
 
 ```sh
-make verify             # Check the Verus contracts
-make scx-lachesis       # Verify and build the BPF object and loader
-make scx-lachesis-run   # Run the scheduler inside a QEMU VM
+make verify         # Check the Verus contracts
+make lachesis       # Verify and build the BPF object and loader
+make lachesis-run   # Run the scheduler inside a QEMU VM
 ```
 
 The kernel's BTF is a build input; use `KERNEL_DIR` and `KERNEL_BUILD` to
