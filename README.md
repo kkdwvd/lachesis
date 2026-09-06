@@ -22,8 +22,6 @@ visible. The goal is a scheduler whose guarantees stand up to both formal
 reasoning and the demands of production: fairness with a proof, at the scale
 and speed real workloads need.
 
-<br clear="all">
-
 ## Summary
 
 Lachesis is an early research prototype. The current scheduler uses a shared
