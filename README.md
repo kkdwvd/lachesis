@@ -8,15 +8,8 @@ In Greek mythology, Lachesis is the Fate who measures the thread of life and
 allots each person their share. A CPU scheduler holds a similar responsibility:
 it apportions a finite supply of time among competing threads, and its
 choices determine which work can make progress. Lachesis takes its name from
-that act of measurement and allocation, and asks what it would take to make
-those choices carry a proof.
-
-The goal is a practical, formally verified Linux CPU scheduler: one that gives
-runnable threads their turn, keeps available CPUs working, and bounds how far
-a workload can fall behind its rightful share. Those promises must hold across
-concurrent callbacks, changing demand, and the kernel's own scheduling
-machinery. Fairness is a property of the execution over time, so that is where
-the proofs must reach.
+that act of measurement and allocation, and reinforces it with a proof system
+that guarantees correctness by construction.
 
 Lachesis brings together Rust, Verus, and sched_ext to pursue that goal.
 Policies compile to eBPF, with reusable contracts and proof machinery beneath
