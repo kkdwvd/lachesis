@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# The userspace side of scx_lachesis: the loader binary and, as a workspace
+# member, the verified core it calls. The BPF object is not built by cargo --
+# it comes out of ../toolchain/rules.mk -- and is loaded from a path beside
+# the binary rather than embedded, so the two builds stay independent.
+
+[package]
+name = "scx_lachesis"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+publish = false
+
+[workspace]
+members = ["core"]
+
+[[bin]]
+name = "scx_lachesis"
+path = "src/main.rs"
+
+[dependencies]
+scx_lachesis_core = { path = "core" }
+# Default features build libbpf from libbpf-sys's bundled sources and link
+# it statically, against the system libelf and zlib.
+libbpf-rs = "0.27"
+# Signal handling, and nothing else.
+libc = "0.2"

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# The verified userspace core. Its only dependency is the `verus!` macro,
+# taken as a path dependency on the pinned Verus checkout: cargo resolves
+# that crate's workspace inheritance against Verus's own workspace, and
+# because this build does not set the `verus_keep_ghost` cfg the macro
+# erases every spec, proof and ghost parameter. The verification pass runs
+# the same source through the Verus driver, which does set it; see
+# ../../toolchain/README.md.
+
+[package]
+name = "scx_lachesis_core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+publish = false
+
+[dependencies]
+verus_builtin_macros = { path = "../../../dep/verus/source/builtin_macros" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)'] }

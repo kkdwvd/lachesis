@@ -1,0 +1,11 @@
+# rust-analyzer sees two disjoint things in this repository and needs to be
+# told about both. The BPF crates are built by bare rustc and the Verus
+# driver, with no Cargo workspace anywhere, so `make rust-project` writes
+# rust-project.json for them (see src/toolchain/README.md, "Editor
+# support"). The userspace side is an ordinary cargo project. Listing both
+# here is the documented way to load them together; opening either one alone
+# would leave the other unanalyzed.
+#
+# rust-project.json is generated and gitignored, so this file points at
+# something that does not exist until `make rust-project` has run once.
+linkedProjects = ["rust-project.json", "src/scx_lachesis/Cargo.toml"]
