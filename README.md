@@ -1,22 +1,26 @@
 # Lachesis
 
-<img align="left" src="docs/assets/lachesis.png" width="200" alt="Lachesis holding a spindle and a thread">
+<img align="left" src="docs/assets/lachesis.png" width="240" alt="Lachesis holding a spindle and a thread">
 
-**The justness of Fate, measured in CPU time.**
+**Give every thread its due.**
 
-In Greek mythology, Lachesis is the Fate who measures the thread of life and
-allots each person their share. A CPU scheduler holds a similar responsibility:
-it apportions a finite supply of CPU time among competing threads, and its
-choices determine which work can make progress. Lachesis takes its name from
-that act of measurement and allocation, and reinforces it with a proof system
-that guarantees correctness by construction.
+In Greek mythology, Lachesis measures the thread of life and allots each
+person their share. A CPU scheduler makes a kindred judgement: how to divide
+finite CPU time among competing threads. Lachesis takes its name from that
+responsibility, and its purpose from a simple ambition: to make fair
+allocation a promise we can prove.
 
-Lachesis brings together Rust, Verus, and sched_ext to pursue that goal.
-Policies compile to eBPF, with reusable contracts and proof machinery beneath
-them and an explicit trusted boundary around their interaction with the
-kernel. The ambition is to make rigorous guarantees part of writing a
-scheduler, and to deliver them at the performance and scale production
-workloads demand.
+That promise reaches beyond any single scheduling decision. Runnable threads
+must make progress, available CPUs must serve waiting work, and each workload
+must receive its fair share. Lachesis aims to prove these properties across
+concurrent callbacks and their interaction with the Linux kernel.
+
+Written in Rust, checked with Verus, and compiled to eBPF for sched_ext,
+Lachesis puts reusable contracts and proof machinery beneath readable
+scheduling policies. An explicit trusted boundary makes the assumptions
+visible. The goal is a scheduler whose guarantees stand up to both formal
+reasoning and the demands of production: fairness with a proof, at the scale
+and speed real workloads need.
 
 <br clear="all">
 
