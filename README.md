@@ -2,11 +2,11 @@
 
 <img align="left" src="docs/assets/lachesis.png" width="200" alt="Lachesis holding a spindle and a thread">
 
-**A measured share of time for every thread.**
+**The justness of Fate, measured in CPU time.**
 
 In Greek mythology, Lachesis is the Fate who measures the thread of life and
 allots each person their share. A CPU scheduler holds a similar responsibility:
-it apportions a finite supply of time among competing threads, and its
+it apportions a finite supply of CPU time among competing threads, and its
 choices determine which work can make progress. Lachesis takes its name from
 that act of measurement and allocation, and reinforces it with a proof system
 that guarantees correctness by construction.
