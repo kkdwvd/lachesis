@@ -3,7 +3,7 @@
 # The unverified userspace side of lachesis: the loader binary, and a path
 # dependency on the verified control-plane crate that lives with the policy
 # it loads. The BPF object is not built by cargo -- it comes out of
-# ../toolchain/rules.mk -- and is loaded from a path beside the binary
+# ../../dep/verus-bpf/rules.mk -- and is loaded from a path beside the binary
 # rather than embedded, so the two builds stay independent.
 
 [package]

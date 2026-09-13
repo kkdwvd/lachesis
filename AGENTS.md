@@ -10,23 +10,22 @@ submodule, `origin` is the kkdwvd fork.
 
 - `dep/kkd` — personal tooling monorepo (provides `kdev`); branch `main`
   tracks `origin/main`.
-- `dep/verus` — the Verus verifier, pinned; branch `main` tracks
-  `origin/main`. There is no kkdwvd fork yet, so `origin` is upstream;
-  `git submodule set-url` once one exists. Treat it as read-only — build
-  artefacts (`source/target*`, `source/z3`, `tools/vargo/target`) are
-  gitignored upstream, so `make verus` leaves the checkout clean.
+- `dep/verus-bpf` — the reusable Verus-to-BPF pipeline; branch `main`
+  tracks `origin/main`. It owns the compiler configuration, Verus setup,
+  CO-RE tools, verification/build rules, and editor-project generation.
+- `dep/verus-bpf/dep/verus` — upstream Verus, pinned by verus-bpf. Its
+  `rust-toolchain.toml` selects Rust. Treat this nested checkout as read-only;
+  verifier build outputs are ignored upstream. Initialize submodules recursively.
 
 `src/` is reserved for lachesis-native code and `build/` for generated
 outputs; `build/` is ignored by git. `ROADMAP.md` is a symlink to the project
 roadmap note in `dep/kkd`; read it before planning work and record decisions
 in its decision log.
 
-- `src/toolchain` — the Rust-to-BPF pipeline, lachesis-owned and free to
-  modify. Most of it was imported verbatim from 4ast/rust-bpf `master` at
-  `2570069dd7fa`; `src/toolchain/README.md` records what came from there,
-  what is ours (`rules.mk`, `btf_fixup.py`) and why there are no local
-  edits to the imported files. There is no submodule and no upstream to
-  stay in sync with.
+The pipeline is maintained in `dep/verus-bpf`, not under `src/`. Its
+`TOOLCHAIN.md` records the rust-bpf import and consumer interface. Do not
+add a README.md to verus-bpf. Lachesis owns its kernel selection, ordered
+runtime crates, and explicit trust boundaries in `src/sched/Makefile`.
 
 Four verified crates and one that is not. The BPF side is three of them
 in dependency order -- `lachesis_runtime_trusted`, `lachesis_runtime`,
@@ -69,7 +68,6 @@ src/
     vm-run.sh vm-guest.sh
   loader/          the `lachesis` binary; unverified, compiled by cargo
     Cargo.toml Cargo.lock main.rs
-  toolchain/       the pipeline
 ```
 
 A build leaves one artefact at the repository root: `./lachesis`, a
@@ -88,7 +86,13 @@ KEEP_SYMS := lachesis_ops lachesis_enqueue ... LACHESIS _LICENSE
 USER_MANIFEST := ../loader/Cargo.toml
 USER_CORE_SRC := control/src/lib.rs
 USER_CORE_NAME := lachesis_control
-include ../toolchain/rules.mk
+ROOT_DIR := $(abspath ../..)
+LIB_CRATES := lachesis_runtime_trusted lachesis_runtime
+lachesis_runtime_trusted_DIR := $(ROOT_DIR)/src/runtime/trusted
+lachesis_runtime_DIR := $(ROOT_DIR)/src/runtime
+NOCHEAT_CRATES := lachesis_runtime
+TRUSTED_DIRS := $(lachesis_runtime_trusted_DIR)
+include ../../dep/verus-bpf/rules.mk
 ```
 
 `SRC`, `USER_MANIFEST` and `USER_CORE_SRC` are relative to the program
@@ -97,8 +101,8 @@ map, its entry points, the license, and anything userspace reads back out
 of the maps, which today means the policy's own static. Set
 `USER_MANIFEST` and the pipeline also builds a binary named `$(PROG)` out
 of that cargo project; set `USER_CORE_SRC` and `USER_CORE_NAME` and it
-also verifies that crate with `--no-cheating`. Nothing else about the
-pipeline belongs in a program's Makefile.
+also verifies that crate with `--no-cheating`. The consumer also declares its crate order, trust boundaries, and target
+kernel; generic compilation machinery belongs in verus-bpf.
 
 ## Writing a policy
 
@@ -219,7 +223,7 @@ Three pieces, and the split between them is the point:
   It is a crate and not a module because Verus verifies crates: keeping it
   separate is what lets it be checked without libbpf-rs in the pass. It
   therefore depends on nothing but the `verus!` macro, taken as a path
-  dependency on `dep/verus`. It lives with the policy, not with the
+  dependency on `dep/verus-bpf/dep/verus`. It lives with the policy, not with the
   loader, because what it is for is being checked in the same pass as the
   BPF side it reads.
 - `src/sched/bpf/main.rs`, the policy, unchanged in kind: still the BPF
@@ -300,7 +304,7 @@ So the BPF side copies the two fields that matter into its own static:
 
 ## Submodules
 
-- The gitlinks pin exact submodule commits. `git submodule update --init`
+- The gitlinks pin exact submodule commits. `git submodule update --init --recursive`
   restores those commits; do not add `--remote` unless intentionally updating
   the pinned versions.
 - Always keep complete history: no `--depth`, `--shallow-submodules`, or
@@ -311,8 +315,10 @@ So the BPF side copies the two fields that matter into its own static:
   ```sh
   git -C dep/kkd checkout -B main HEAD
   git -C dep/kkd branch --set-upstream-to=origin/main main
-  git -C dep/verus checkout -B main HEAD
-  git -C dep/verus branch --set-upstream-to=origin/main main
+  git -C dep/verus-bpf checkout -B main HEAD
+  git -C dep/verus-bpf branch --set-upstream-to=origin/main main
+  git -C dep/verus-bpf/dep/verus checkout -B main HEAD
+  git -C dep/verus-bpf/dep/verus branch --set-upstream-to=origin/main main
   ```
 
 - These attachment commands are for fresh clones only. Do not rerun them over
@@ -324,7 +330,7 @@ So the BPF side copies the two fields that matter into its own static:
   relying on this file to enumerate them; `make -C src/sched help` adds
   the per-program toolchain variables.
 - `kdev` comes from the pinned `dep/kkd` submodule, not from a system install.
-- `make verus` builds the verifier out of `dep/verus` with vstd in
+- `make verus` builds the verifier out of `dep/verus-bpf/dep/verus` with vstd in
   `no_std`/`no_alloc` mode; it is a no-op once current and is a prerequisite
   of `verify` and `lachesis`. `make verus-clean` drops its outputs.
 - `make lachesis` verifies and then builds both
@@ -363,13 +369,13 @@ So the BPF side copies the two fields that matter into its own static:
   `rust-analyzer.toml` at the repository root names both through
   `linkedProjects`. That is what an editor's language server reads; the
   `rust-analyzer diagnostics` CLI ignores it and only ever loads
-  `rust-project.json`. See `src/toolchain/README.md`, "Editor support".
+  `rust-project.json`. See `dep/verus-bpf/TOOLCHAIN.md`, "Editor support".
 
 ## Verification
 
 - The same source is compiled twice: the Verus driver on the host target with
   ghost code kept, then plain rustc on the BPF target with ghost code erased
-  by the `verus!` macro. `src/toolchain/README.md` has the details and the
+  by the `verus!` macro. `dep/verus-bpf/TOOLCHAIN.md` has the details and the
   toolchain matrix; the short version is that `rustc` is Verus's pin and its
   LLVM must not be newer than the LLVM tools.
 - Three crates, in dependency order: `lachesis_runtime_trusted`,
@@ -398,10 +404,9 @@ So the BPF side copies the two fields that matter into its own static:
   and never leave it set in a script.
 - No `assume(`, `admit(`, `external_body`, `assume_specification`,
   `external_fn_specification`, `#[verifier::external]` or `unsafe` may
-  appear anywhere under `src/` outside `src/runtime/trusted/`. Two
-  exemptions, both from the `unsafe` half only: `src/toolchain`, the
-  imported compile pipeline, trusted whole by roadmap section 3.7 item 5,
-  and `src/loader`, the directory holding the manifest `USER_MANIFEST`
+  appear anywhere under `src/` outside `src/runtime/trusted/`. One
+  exemption from the `unsafe` half only: `src/loader`, the directory holding
+  the manifest `USER_MANIFEST`
   names, which is unverified by design and needs `unsafe` to install a
   signal handler. `lint-trusted` prints the exemption on every run. `make
   trusted-lines` prints `wc -l` over `src/runtime/trusted/*.rs` and over
@@ -442,8 +447,8 @@ So the BPF side copies the two fields that matter into its own static:
   fetch the true upstream base, rebase the attached branch onto it, then
   force-push (`--force-with-lease`) the branch back to the fork. Every step is
   a no-op when already current, so re-running is always safe. `dep/kkd` has no
-  separate upstream, so its rebase base is `origin/main`, and so is
-  `dep/verus`'s.
+  separate upstream, so its rebase base is `origin/main`, as are verus-bpf
+  and the nested Verus checkout's configured bases.
 - Both reject detached HEADs and tracked or staged changes; untracked files
   are left alone.
 - If a rebase conflicts, `make rebase` continues with the remaining repos and

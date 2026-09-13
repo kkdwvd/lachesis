@@ -37,10 +37,10 @@ base; the loader and compilation pipeline are also outside the proofs.
 ## Build and run
 
 Initialize the pinned dependencies, then consult the build targets and
-[toolchain requirements](src/toolchain/README.md#toolchain-matrix):
+[toolchain requirements](dep/verus-bpf/TOOLCHAIN.md#setup):
 
 ```sh
-git submodule update --init
+git submodule update --init --recursive
 make help
 make -C src/sched help
 ```

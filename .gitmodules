@@ -1,6 +1,6 @@
 [submodule "kkd"]
 	path = dep/kkd
 	url = git@github.com:kkdwvd/kkd.git
-[submodule "verus"]
-	path = dep/verus
-	url = https://github.com/verus-lang/verus.git
+[submodule "verus-bpf"]
+	path = dep/verus-bpf
+	url = git@github.com:kkdwvd/verus-bpf.git
