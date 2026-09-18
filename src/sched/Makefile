@@ -25,6 +25,9 @@ USER_CORE_NAME := lachesis_control
 
 ROOT_DIR := $(abspath ../..)
 KERNEL_DIR ?= $(HOME)/src/linux
+# The pipeline defaults to Ubuntu's versioned prefix; a host whose LLVM 22
+# is the system one (llc, opt, llvm-config under /usr/bin) is just /usr.
+LLVM_PREFIX ?= $(if $(wildcard /usr/lib/llvm-22/bin/llc),/usr/lib/llvm-22,/usr)
 KERNEL_BUILD ?= $(KERNEL_DIR)/.kdev/build/kernel
 LIB_CRATES := lachesis_runtime_trusted lachesis_runtime
 lachesis_runtime_trusted_DIR := $(ROOT_DIR)/src/runtime/trusted
