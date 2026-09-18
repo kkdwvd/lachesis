@@ -20,7 +20,9 @@ balance, the guard of the own word, the busy-only steal with the mover's
 own rq lock dropped and the victim's word reset, idle entry, `update_idle`
 reading the count and claiming its own bit, and the kick-wake; the per-CPU
 rq lock with the kernel's hold pattern; the word itself, free, promised,
-busy or scanning. Not modelled: affinity and the global DSQ fallback.
+busy or scanning. Not modelled: affinity, kernel dequeues that are not
+consumptions, and the global DSQ fallback; roadmap section 7.4 lists every
+gap between the models and the kernel.
 
 Three properties are checked. `CWC` is Ipanema's concurrent work
 conservation, evaluated at the end of every event through the ghost sets

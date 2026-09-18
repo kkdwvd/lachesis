@@ -98,10 +98,13 @@
 //!
 //! What is not modelled: time slices and ticks (a task runs until it
 //! blocks; the TLA+ mirror has them), affinity (every task may run
-//! anywhere), the kernel's global DSQ fallback, and more than one wakeup
-//! of the same task at once. The correspondence between these actions and
-//! the callbacks' contracts is by construction; phase 5's refinement is
-//! what will make it a theorem.
+//! anywhere; the trace recorder has shown a pinned task breaking the
+//! theorem as stated), kernel dequeues that are not consumptions, the
+//! kernel's global DSQ fallback, and more than one wakeup of the same
+//! task at once. The correspondence between these actions and the
+//! callbacks' contracts is by construction; phase 5's refinement is what
+//! will make it a theorem. Roadmap section 7.4 is the full list of gaps,
+//! with what each rests on.
 
 #![no_std]
 #![allow(unused_imports)]
