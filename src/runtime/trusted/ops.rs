@@ -239,8 +239,10 @@ macro_rules! __entry {
             )*
             // Method-call syntax: the `Policy` trait comes in through the
             // policy crate's prelude, and this crate cannot name it -- it
-            // is the dependency, not the dependent.
-            $crate::ops::IntoRet::into_ret($inst.$m($($a),*))
+            // is the dependency, not the dependent. Every callback also gets
+            // a fresh receipt log; it is a zero-sized struct in the object.
+            let mut log = $crate::log::Log::new();
+            $crate::ops::IntoRet::into_ret($inst.$m($($a,)* &mut log))
         }
     };
 }

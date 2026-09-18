@@ -17,6 +17,7 @@
 
 use core::sync::atomic::{AtomicU64 as CoreAtomicU64, Ordering::Relaxed};
 
+use crate::log::{Log, Op};
 use crate::vprelude::*;
 
 verus! {
@@ -51,14 +52,56 @@ impl AtomicU64 {
     }
 }
 
+/// The published count: what a policy bumps before it does anything else
+/// in `enqueue`, takes down in `dequeue`, and reads in `update_idle`. An
+/// `AtomicU64` with a role, so that the receipt log can name it: the
+/// refinement contracts look for `CountInc` before the idle search and for
+/// `CountLoad` before a self-kick, and only this type produces them.
+#[verifier::external_body]
+pub struct Counter {
+    inner: CoreAtomicU64,
+}
+
+impl Counter {
+    #[verifier::external_body]
+    pub fn inc(&self, log: &mut Log)
+        ensures
+            final(log).ops@ == old(log).ops@.push(Op::CountInc),
+    {
+        self.inner.fetch_add(1, Relaxed);
+    }
+
+    #[verifier::external_body]
+    pub fn dec(&self, log: &mut Log)
+        ensures
+            final(log).ops@ == old(log).ops@.push(Op::CountDec),
+    {
+        self.inner.fetch_sub(1, Relaxed);
+    }
+
+    #[verifier::external_body]
+    pub fn load(&self, log: &mut Log) -> (r: u64)
+        ensures
+            final(log).ops@ == old(log).ops@.push(Op::CountLoad { count: r }),
+    {
+        self.inner.load(Relaxed)
+    }
+}
+
 } // verus!
 
-// The constructor is plain Rust, outside `verus!`: it is `const` so that
-// the `scheduler!` static can be initialized with it, and it is only ever
-// called from that macro-generated initializer, which is external to Verus
-// anyway.
+// The constructors are plain Rust, outside `verus!`: they are `const` so
+// that the `scheduler!` static can be initialized with them, and they are
+// only ever called from that macro-generated initializer, which is
+// external to Verus anyway.
 impl AtomicU64 {
     pub const fn new(v: u64) -> Self {
         AtomicU64 { inner: CoreAtomicU64::new(v) }
+    }
+}
+
+impl Counter {
+    pub const fn new() -> Self {
+        Counter { inner: CoreAtomicU64::new(0) }
     }
 }

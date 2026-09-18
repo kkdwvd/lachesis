@@ -68,6 +68,8 @@ use lachesis_runtime::prelude::*;
 
 verus! {
 
+broadcast use refine::group_refine;
+
 /// The most CPUs this policy attaches to. Per-CPU queue ids are the CPU
 /// numbers, so they never collide with the kernel's builtin DSQs, whose
 /// ids all have the top bit set; `init` refuses a larger machine rather
@@ -102,18 +104,18 @@ const FALLBACK: usize = 6;
 /// global DSQ because their CPU has no queue.
 pub struct Lachesis {
     vtime_now: AtomicU64,
-    nr_queued: AtomicU64,
+    nr_queued: Counter,
     stats: Stats<7>,
     exit_kind: AtomicU64,
     exit_code: AtomicU64,
     /// Per CPU: a task is running there right now. Published for the
     /// steal scan; the loader does not print it.
-    busy: Flags<64>,
+    busy: Busy<64>,
     /// Per CPU: an enqueue has claimed it and filed a task for its queue
     /// that nobody has consumed yet. Set by the claimer, cleared by
     /// whoever consumes from that queue; a second claimer that finds it
     /// set kicks the CPU and looks on. Not printed either.
-    claimed: Flags<64>,
+    claimed: Claims<64>,
 }
 
 /// The number of per-CPU queues, which is the number of possible CPUs
@@ -121,12 +123,19 @@ pub struct Lachesis {
 /// above the cap, so after a successful attach the cap never binds; it is
 /// here so that every loop below has a bound Verus and the BPF verifier
 /// can both see.
-fn nr_cpus() -> (r: u32)
+fn nr_cpus(log: &mut Log) -> (r: u32)
     ensures
         1 <= r <= MAX_CPUS,
+        exists|m: u32| final(log).ops@ == old(log).ops@.push(Op::NrCpuIds { nr: m })
+            && r as int == refine::cap_of(m),
 {
-    let n = scx::nr_cpu_ids();
-    if n < MAX_CPUS { n } else { MAX_CPUS }
+    let n = scx::nr_cpu_ids(log);
+    let r = if n < MAX_CPUS { n } else { MAX_CPUS };
+    proof {
+        // The witness for the postcondition's `exists`: what was read.
+        assert(log.ops@ == old(log).ops@.push(Op::NrCpuIds { nr: n }) && r as int == refine::cap_of(n));
+    }
+    r
 }
 
 impl Policy for Lachesis {
@@ -135,7 +144,7 @@ impl Policy for Lachesis {
     /// default, which direct-dispatches to a local DSQ when it finds an
     /// idle CPU and skips `enqueue` altogether: see the header for the
     /// bubble that opens.
-    fn select_cpu(&self, _p: Task, prev_cpu: i32, _wake_flags: u64) -> i32 {
+    fn select_cpu(&self, _p: Task, prev_cpu: i32, _wake_flags: u64, _log: &mut Log) -> i32 {
         prev_cpu
     }
 
@@ -152,42 +161,55 @@ impl Policy for Lachesis {
     /// CPU that went idle while this ran has either not set its idle bit
     /// yet, in which case its `update_idle` will read the count after this
     /// bump, or has, in which case the search sees the bit.
-    fn enqueue(&self, p: Task, enq_flags: u64) {
+    fn enqueue(&self, p: Task, enq_flags: u64, log: &mut Log) {
+        let ghost pre = log.ops@;
         let vtime = clamp_vtime(p.vtime(), self.vtime_now.load(), SCX_SLICE_DFL);
-        let cpu = scx::task_cpu(&p);
-        let n = nr_cpus();
+        let cpu = scx::task_cpu(&p, log);
+        let n = nr_cpus(log);
         if cpu as u32 >= n {
             // Unreachable after a successful `init`, which refuses a
             // machine this policy has no queue for; the global DSQ is the
             // kernel's own fallback, every CPU consumes it, and a task
             // sent there never enters custody, so it is not counted.
             self.stats.inc(FALLBACK);
-            scx::dsq_insert_vtime(&p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, vtime, enq_flags);
+            scx::dsq_insert_vtime(&p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, vtime, enq_flags, log);
             return;
         }
-        self.nr_queued.fetch_add(1);
+        self.nr_queued.inc(log);
         let mut q: u32 = cpu as u32;
         let mut placed_idle = false;
         let mut tries: u32 = 0;
         // Each pass claims one more idle CPU, so the search cannot see the
         // same one twice and ends within `n` passes.
         while tries < n
+            invariant_except_break
+                q == cpu as u32,
+                refine::searching(cpu as int, n as int, tries as int,
+                                  refine::enq_run(refine::tail_of(pre, log.ops@))),
             invariant
                 tries <= n,
                 n <= MAX_CPUS,
                 q < n,
+                cpu >= 0,
+                refine::extends(pre, log.ops@),
+            ensures
+                refine::insert_finishes(refine::enq_run(refine::tail_of(pre, log.ops@)), q as u64),
             decreases n - tries,
         {
-            let (target, is_idle) = scx::select_cpu_dfl(&p, cpu, 0);
-            if !is_idle || (target as u32) >= n {
+            let (target, is_idle) = scx::select_cpu_dfl(&p, cpu, 0, log);
+            if !is_idle {
                 break;
             }
-            scx::kick_cpu(target, SCX_KICK_IDLE);
-            // Ours if its queue is empty and no earlier claim is still
-            // waiting to land there; otherwise the kick alone is what it
-            // needed, and the search goes on.
-            if scx::dsq_nr_queued(target as u64) <= 0
-                && !self.claimed.test_and_set(target as usize)
+            // Claimed, so kicked, before anything else is asked of it.
+            scx::kick_cpu(target, SCX_KICK_IDLE, log);
+            // Ours if it has a queue, its queue is empty and no earlier
+            // claim is still waiting to land there; otherwise the kick
+            // alone is what it needed, and the search goes on. A CPU
+            // beyond the queues cannot come back from the search after a
+            // successful `init`; it is kicked all the same.
+            if (target as u32) < n
+                && scx::dsq_nr_queued(target as u64, log) <= 0
+                && !self.claimed.test_and_set(target as usize, log)
             {
                 q = target as u32;
                 placed_idle = true;
@@ -200,14 +222,14 @@ impl Policy for Lachesis {
         } else {
             self.stats.inc(PLACE_BUSY);
         }
-        scx::dsq_insert_vtime(&p, q as u64, SCX_SLICE_DFL, vtime, enq_flags);
+        scx::dsq_insert_vtime(&p, q as u64, SCX_SLICE_DFL, vtime, enq_flags, log);
     }
 
     /// The task is leaving custody: consumed by a dispatch here or on the
     /// CPU that stole it, or removed by the kernel. Either way it is no
     /// longer queued or in flight, and the count follows.
-    fn dequeue(&self, _p: Task, _deq_flags: u64) {
-        self.nr_queued.fetch_sub(1);
+    fn dequeue(&self, _p: Task, _deq_flags: u64, log: &mut Log) {
+        self.nr_queued.dec(log);
     }
 
     /// Serve this CPU from its own queue, and failing that steal: for
@@ -218,35 +240,43 @@ impl Policy for Lachesis {
     /// read was not overloaded when read. That is the exhaustiveness the
     /// work-conservation proof needs, and the thing CFS's balancer does
     /// not do; the busy test is Ipanema's `can_steal_core`.
-    fn dispatch(&self, cpu: i32, _prev: Option<Task>) {
-        if scx::dsq_move_to_local(cpu as u64) {
+    fn dispatch(&self, cpu: i32, _prev: Option<Task>, log: &mut Log) {
+        let ghost pre = log.ops@;
+        if scx::dsq_move_to_local(cpu as u64, log) {
             // Whatever an enqueue claimed this CPU for, it is being served.
             // The index is built from the 32-bit value the bound was
             // checked on: the BPF verifier does not carry a bound on a
             // sign-extended `i32` over to the 64-bit index.
             let me = cpu as u32;
             if me < MAX_CPUS {
-                self.claimed.clear(me as usize);
+                self.claimed.clear(me as usize, log);
             }
             self.stats.inc(OWN);
             return;
         }
-        let n = nr_cpus();
+        let n = nr_cpus(log);
         let mut c: u32 = 0;
         while c < n
             invariant
                 c <= n,
                 n <= MAX_CPUS,
+                cpu >= 0,
+                // A loop body is checked on its own, so the return inside
+                // has to be told what `pre` is.
+                pre == old(log).ops@,
+                refine::extends(pre, log.ops@),
+                refine::scanning(cpu as int, n as int, c as int,
+                                 refine::dsp_run(cpu as int, refine::tail_of(pre, log.ops@))),
             decreases n - c,
         {
             if c != cpu as u32
-                && self.busy.get(c as usize)
-                && scx::dsq_nr_queued(c as u64) > 0
-                && scx::dsq_move_to_local(c as u64)
+                && self.busy.get(c as usize, log)
+                && scx::dsq_nr_queued(c as u64, log) > 0
+                && scx::dsq_move_to_local(c as u64, log)
             {
                 // If that was a task an enqueue had filed there for a
                 // claim, the claim is served; the mark must not outlive it.
-                self.claimed.clear(c as usize);
+                self.claimed.clear(c as usize, log);
                 self.stats.inc(STEAL);
                 return;
             }
@@ -257,14 +287,14 @@ impl Policy for Lachesis {
 
     /// The global clock only moves forward, to the vtime of whatever runs;
     /// and this CPU is now busy, which is what makes its queue stealable.
-    fn running(&self, p: Task) {
+    fn running(&self, p: Task, log: &mut Log) {
         let vtime = p.vtime();
         if vtime_before(self.vtime_now.load(), vtime) {
             self.vtime_now.store(vtime);
         }
-        let cpu = scx::task_cpu(&p) as u32;
+        let cpu = scx::task_cpu(&p, log) as u32;
         if cpu < MAX_CPUS {
-            self.busy.set(cpu as usize);
+            self.busy.set(cpu as usize, log);
         }
     }
 
@@ -272,16 +302,16 @@ impl Policy for Lachesis {
     /// task advances its vtime more slowly and is picked again sooner; and
     /// this CPU is no longer running a task, so its queue is its own to
     /// serve until `running` says otherwise.
-    fn stopping(&self, p: Task, _runnable: bool) {
+    fn stopping(&self, p: Task, _runnable: bool, log: &mut Log) {
         p.set_vtime(charge_vtime(p.vtime(), p.slice(), SCX_SLICE_DFL, p.weight()));
-        let cpu = scx::task_cpu(&p) as u32;
+        let cpu = scx::task_cpu(&p, log) as u32;
         if cpu < MAX_CPUS {
-            self.busy.clear(cpu as usize);
+            self.busy.clear(cpu as usize, log);
         }
     }
 
     /// A task joining the scheduler starts at the current global vtime.
-    fn enable(&self, p: Task) {
+    fn enable(&self, p: Task, _log: &mut Log) {
         p.set_vtime(self.vtime_now.load());
     }
 
@@ -296,18 +326,21 @@ impl Policy for Lachesis {
     /// where the steal happens. If the task has not landed yet by then,
     /// the CPU comes back here and kicks again, which is why the count and
     /// not the queues is what is read.
-    fn update_idle(&self, cpu: i32, idle: bool) {
-        if idle && self.nr_queued.load() > 0 && scx::test_and_clear_cpu_idle(cpu) {
+    fn update_idle(&self, cpu: i32, idle: bool, log: &mut Log) {
+        if idle
+            && self.nr_queued.load(log) > 0
+            && scx::test_and_clear_cpu_idle(cpu, log)
+        {
             self.stats.inc(KICK_IDLE);
-            scx::kick_cpu(cpu, SCX_KICK_IDLE);
+            scx::kick_cpu(cpu, SCX_KICK_IDLE, log);
         }
     }
 
     /// One queue per possible CPU. A machine with more CPUs than this
     /// policy can name is refused, which is what makes the cap in
     /// `nr_cpus` never bind once attached.
-    fn init(&self) -> i32 {
-        let n = scx::nr_cpu_ids();
+    fn init(&self, log: &mut Log) -> i32 {
+        let n = scx::nr_cpu_ids(log);
         if n > MAX_CPUS {
             return -E2BIG;
         }
@@ -331,7 +364,7 @@ impl Policy for Lachesis {
     /// name it after the link is gone. `exit_code` is stored first: the
     /// loader treats a non-zero `exit_kind` as "both fields are set", and
     /// `SCX_EXIT_NONE` is zero.
-    fn exit(&self, ei: &ExitInfo) {
+    fn exit(&self, ei: &ExitInfo, _log: &mut Log) {
         self.exit_code.store(ei.exit_code());
         self.exit_kind.store(ei.kind() as u64);
     }
@@ -345,12 +378,12 @@ scheduler! {
     flags: SCX_OPS_KEEP_BUILTIN_IDLE,
     policy: LACHESIS: Lachesis = Lachesis {
         vtime_now: AtomicU64::new(0),
-        nr_queued: AtomicU64::new(0),
+        nr_queued: Counter::new(),
         stats: Stats::new(),
         exit_kind: AtomicU64::new(0),
         exit_code: AtomicU64::new(0),
-        busy: Flags::new(),
-        claimed: Flags::new(),
+        busy: Busy::new(),
+        claimed: Claims::new(),
     },
     ops {
         select_cpu as lachesis_select_cpu,

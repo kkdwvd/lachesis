@@ -30,13 +30,14 @@ KERNEL_DIR ?= $(HOME)/src/linux
 # is the system one (llc, opt, llvm-config under /usr/bin) is just /usr.
 LLVM_PREFIX ?= $(if $(wildcard /usr/lib/llvm-22/bin/llc),/usr/lib/llvm-22,/usr)
 KERNEL_BUILD ?= $(KERNEL_DIR)/.kdev/build/kernel
-# The model comes last: it is ghost only, imports nothing from the two
-# runtime crates, and sits in the list so that its proof gates the object.
-LIB_CRATES := lachesis_runtime_trusted lachesis_runtime lachesis_model
+# The model sits between the trusted crate, whose receipt ops it names,
+# and the runtime, whose Policy trait names its refinement contracts; it is
+# ghost only, and its proof gates the object like the others.
+LIB_CRATES := lachesis_runtime_trusted lachesis_model lachesis_runtime
 lachesis_runtime_trusted_DIR := $(ROOT_DIR)/src/runtime/trusted
-lachesis_runtime_DIR := $(ROOT_DIR)/src/runtime
 lachesis_model_DIR := $(ROOT_DIR)/src/model
-NOCHEAT_CRATES := lachesis_runtime lachesis_model
+lachesis_runtime_DIR := $(ROOT_DIR)/src/runtime
+NOCHEAT_CRATES := lachesis_model lachesis_runtime
 TRUSTED_DIRS := $(lachesis_runtime_trusted_DIR)
 
 VERUS_BPF_DIR ?= $(ROOT_DIR)/dep/verus-bpf

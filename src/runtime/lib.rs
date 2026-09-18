@@ -30,6 +30,12 @@ pub mod prelude {
     pub use lachesis_runtime_trusted::prelude::*;
 
     pub use crate::policy::Policy;
+    // The refinement contracts the `Policy` trait states, and the automata
+    // and lemmas a policy's proof of them names. Ghost only: the model
+    // crate defines the module under `verus_keep_ghost`, and everything
+    // that names it is inside `verus!`, so the erased pass never sees it.
+    #[cfg(verus_keep_ghost)]
+    pub use lachesis_model::refine;
     // Spec items are not re-exported: the `verus!` macro deletes them in the
     // erased pass, so naming one outside a `verus!` block breaks the BPF
     // build. A policy that needs `spec_vtime_before` imports it inside its

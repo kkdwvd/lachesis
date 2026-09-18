@@ -17,6 +17,7 @@
 //! 5's refinement is where the two get tied together.
 
 use crate::kfunc;
+use crate::log::{Log, Op};
 use crate::task::Task;
 use crate::vprelude::*;
 
@@ -58,9 +59,15 @@ pub const SCX_OPS_KEEP_BUILTIN_IDLE: u64 = 1 << 0;
 /// verdict comes with a valid CPU number: the search claims the CPU by
 /// clearing its idle bit, so the number is one the kernel just handed out.
 #[verifier::external_body]
-pub fn select_cpu_dfl(p: &Task, prev_cpu: i32, wake_flags: u64) -> (r: (i32, bool))
+pub fn select_cpu_dfl(
+    p: &Task,
+    prev_cpu: i32,
+    wake_flags: u64,
+    log: &mut Log,
+) -> (r: (i32, bool))
     ensures
         r.1 ==> r.0 >= 0,
+        final(log).ops@ == old(log).ops@.push(Op::SelectDfl { cpu: r.0, idle: r.1 }),
 {
     let mut is_idle = false;
     let cpu = unsafe {
@@ -71,13 +78,26 @@ pub fn select_cpu_dfl(p: &Task, prev_cpu: i32, wake_flags: u64) -> (r: (i32, boo
 
 /// Insert `p` at the tail of `dsq_id` with a time slice.
 #[verifier::external_body]
-pub fn dsq_insert(p: &Task, dsq_id: u64, slice: u64, enq_flags: u64) {
+pub fn dsq_insert(p: &Task, dsq_id: u64, slice: u64, enq_flags: u64, log: &mut Log)
+    ensures
+        final(log).ops@ == old(log).ops@.push(Op::Insert { dsq: dsq_id }),
+{
     unsafe { kfunc::scx_bpf_dsq_insert(p.as_ptr(), dsq_id, slice, enq_flags) }
 }
 
 /// Insert `p` into `dsq_id` ordered by `vtime`.
 #[verifier::external_body]
-pub fn dsq_insert_vtime(p: &Task, dsq_id: u64, slice: u64, vtime: u64, enq_flags: u64) {
+pub fn dsq_insert_vtime(
+    p: &Task,
+    dsq_id: u64,
+    slice: u64,
+    vtime: u64,
+    enq_flags: u64,
+    log: &mut Log,
+)
+    ensures
+        final(log).ops@ == old(log).ops@.push(Op::Insert { dsq: dsq_id }),
+{
     unsafe { kfunc::scx_bpf_dsq_insert_vtime(p.as_ptr(), dsq_id, slice, vtime, enq_flags) }
 }
 
@@ -87,7 +107,10 @@ pub fn dsq_insert_vtime(p: &Task, dsq_id: u64, slice: u64, vtime: u64, enq_flags
 /// kernel walks the queue and skips the ineligible, so a policy's steal
 /// needs no eligibility check of its own.
 #[verifier::external_body]
-pub fn dsq_move_to_local(dsq_id: u64) -> (r: bool) {
+pub fn dsq_move_to_local(dsq_id: u64, log: &mut Log) -> (r: bool)
+    ensures
+        final(log).ops@ == old(log).ops@.push(Op::MoveToLocal { dsq: dsq_id, moved: r }),
+{
     unsafe { kfunc::scx_bpf_dsq_move_to_local(dsq_id) }
 }
 
@@ -100,7 +123,10 @@ pub fn dsq_move_to_local(dsq_id: u64) -> (r: bool) {
 /// underestimates; here the kernel maintains the count under its lock and
 /// the property is assumed instead.
 #[verifier::external_body]
-pub fn dsq_nr_queued(dsq_id: u64) -> (r: i32) {
+pub fn dsq_nr_queued(dsq_id: u64, log: &mut Log) -> (r: i32)
+    ensures
+        final(log).ops@ == old(log).ops@.push(Op::NrQueued { dsq: dsq_id, n: r }),
+{
     unsafe { kfunc::scx_bpf_dsq_nr_queued(dsq_id) }
 }
 
@@ -110,9 +136,11 @@ pub fn dsq_nr_queued(dsq_id: u64) -> (r: i32) {
 /// An invalid CPU number ejects the scheduler, hence the precondition; a
 /// policy passes only numbers the kernel gave it.
 #[verifier::external_body]
-pub fn kick_cpu(cpu: i32, flags: u64)
+pub fn kick_cpu(cpu: i32, flags: u64, log: &mut Log)
     requires
         cpu >= 0,
+    ensures
+        final(log).ops@ == old(log).ops@.push(Op::Kick { cpu: cpu }),
 {
     unsafe { kfunc::scx_bpf_kick_cpu(cpu, flags) }
 }
@@ -121,9 +149,10 @@ pub fn kick_cpu(cpu: i32, flags: u64)
 /// is the CPU that callback returned, and it is where a per-CPU queue
 /// policy files the task. Always a valid CPU number, so never negative.
 #[verifier::external_body]
-pub fn task_cpu(p: &Task) -> (r: i32)
+pub fn task_cpu(p: &Task, log: &mut Log) -> (r: i32)
     ensures
         r >= 0,
+        final(log).ops@ == old(log).ops@.push(Op::TaskCpu { cpu: r }),
 {
     unsafe { kfunc::scx_bpf_task_cpu(p.as_ptr()) }
 }
@@ -138,9 +167,11 @@ pub fn task_cpu(p: &Task) -> (r: i32)
 /// one read the interlock argument turns on. Ejects the scheduler on an
 /// invalid CPU, hence the precondition.
 #[verifier::external_body]
-pub fn test_and_clear_cpu_idle(cpu: i32) -> (r: bool)
+pub fn test_and_clear_cpu_idle(cpu: i32, log: &mut Log) -> (r: bool)
     requires
         cpu >= 0,
+    ensures
+        final(log).ops@ == old(log).ops@.push(Op::TestAndClearIdle { cpu: cpu, was: r }),
 {
     unsafe { kfunc::scx_bpf_test_and_clear_cpu_idle(cpu) }
 }
@@ -148,9 +179,10 @@ pub fn test_and_clear_cpu_idle(cpu: i32) -> (r: bool)
 /// `nr_cpu_ids`, one more than the highest possible CPU number. At least
 /// one, since the CPU asking exists.
 #[verifier::external_body]
-pub fn nr_cpu_ids() -> (r: u32)
+pub fn nr_cpu_ids(log: &mut Log) -> (r: u32)
     ensures
         r >= 1,
+        final(log).ops@ == old(log).ops@.push(Op::NrCpuIds { nr: r }),
 {
     unsafe { kfunc::scx_bpf_nr_cpu_ids() }
 }

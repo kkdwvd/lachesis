@@ -67,6 +67,9 @@ use verus_builtin_macros::verus;
 
 // Ghost only: the erased pass compiles an empty crate.
 #[cfg(verus_keep_ghost)]
+pub mod refine;
+
+#[cfg(verus_keep_ghost)]
 pub mod cwc {
 
 use vstd::prelude::*;
