@@ -28,11 +28,12 @@ add a README.md to verus-bpf. Lachesis owns its kernel selection, ordered
 runtime crates, and explicit trust boundaries in `src/sched/Makefile`.
 
 Five verified crates and one that is not. The BPF side is four of them
-in dependency order -- `lachesis_runtime_trusted`, `lachesis_runtime`,
-`lachesis_model`, then the policy -- each verified and compiled against
-the ones before it; the model is ghost only and erases to an empty rlib.
-`lachesis_control` is verified beside them and imports none of them. The
-loader is verified by nothing.
+in dependency order -- `lachesis_runtime_trusted`, `lachesis_model`,
+`lachesis_runtime`, then the policy -- each verified and compiled against
+the ones before it; the model is ghost only and erases to an empty rlib,
+and sits below the runtime because the runtime's `Policy` trait states
+its contracts in the model's terms. `lachesis_control` is verified beside
+them and imports none of them. The loader is verified by nothing.
 
 - `src/runtime/trusted` — `lachesis_runtime_trusted`, the trusted base,
   and the only place in the tree where `unsafe` or a Verus cheat may
@@ -42,9 +43,12 @@ loader is verified by nothing.
   views, the `Task` handle and its accessor specifications), `atomic.rs`
   (an opaque `AtomicU64` with no `Ordering` in its interface), `stats.rs`
   (`Stats<N>`, the `.bss` counters), `panic.rs` (the one
-  `#[panic_handler]`), `flags.rs` (`Flags<N>`, per-CPU booleans other
-  CPUs read without a lock) and `ops.rs` (the `scheduler!` macro and its
-  trampolines).
+  `#[panic_handler]`), `flags.rs` (`Busy<N>` and `Claims<N>`, per-CPU
+  booleans other CPUs read without a lock), `log.rs` (the receipt log:
+  the ghost `Op` every wrapper appends, which the refinement contracts
+  are stated over) and `ops.rs` (the `scheduler!` macro and its
+  trampolines). `atomic.rs` also holds `Counter`, the published count,
+  an `AtomicU64` with a role so that the log can name it.
 - `src/runtime` — `lachesis_runtime`, the checked layer every scheduler
   links: `policy.rs` (the `Policy` trait, where a callback's contract is
   written down), `vtime.rs` (virtual-time arithmetic) and `lib.rs` with
@@ -55,14 +59,19 @@ loader is verified by nothing.
   (roadmap section 5.4): the sched_ext event model at one transition per
   shared-variable access, the per-CPU-queue policy's actions under the
   same names, Ipanema's definitions restated for it, the inductive
-  invariant and the theorem. Ghost only, verified with `--no-cheating`,
-  and last in `LIB_CRATES` so that a broken proof stops the object build.
+  invariant and the theorem. `refine.rs` beside it is the refinement
+  contracts: for each callback the model has an action for, an automaton
+  over the receipts the callback may leave, which the `Policy` trait's
+  `ensures` names and the policy proves it drives to the end. Ghost only,
+  verified with `--no-cheating`, and a broken proof in it stops the
+  object build like every library's does.
   `src/tla/` is its TLA+ mirror under the same action names; `make tlc`
   checks the theorem there, confirms that four weakened variants of the
   policy violate it, and that a fifth, the steal that gives up after its
   first candidate, is tolerated.
 - `src/sched` — one scheduler, and everything about it that is verified:
-  `bpf/main.rs` the policy, `control/` the crate `lachesis_control`, the
+  `bpf/main.rs` the policy, `bpf/mutants/` ten variants of it that the
+  contracts must reject, `control/` the crate `lachesis_control`, the
   Makefile stub, and the `vm-run.sh`/`vm-guest.sh` pair that runs the
   whole thing in a VM.
 - `src/loader` — `lachesis`, the userspace binary. Unverified by design,
@@ -73,11 +82,12 @@ loader is verified by nothing.
 src/
   runtime/         lachesis_runtime; substrate, verified
     trusted/       lachesis_runtime_trusted; assumed, `unsafe` lives here
-  model/           lachesis_model; the work-conservation model and proof
+  model/           lachesis_model; the model, its proof, the contracts
   tla/             the TLA+ mirror of that model; `make tlc`
   sched/           one scheduler
-    Makefile       PROG, SRC, KEEP_SYMS, USER_MANIFEST, USER_CORE_*
+    Makefile       PROG, SRC, KEEP_SYMS, MUTANTS, USER_MANIFEST, USER_CORE_*
     bpf/main.rs    the BPF policy; verified, compiled by rules.mk
+    bpf/mutants/   policies Verus must reject; `make verify` checks each
     control/       lachesis_control; verified, compiled by both
     vm-run.sh vm-guest.sh
   loader/          the `lachesis` binary; unverified, compiled by cargo
@@ -102,23 +112,29 @@ USER_CORE_SRC := control/src/lib.rs
 USER_CORE_NAME := lachesis_control
 ROOT_DIR := $(abspath ../..)
 LLVM_PREFIX ?= $(if $(wildcard /usr/lib/llvm-22/bin/llc),/usr/lib/llvm-22,/usr)
-LIB_CRATES := lachesis_runtime_trusted lachesis_runtime lachesis_model
+MUTANTS := $(sort $(wildcard bpf/mutants/*.patch))
+LIB_CRATES := lachesis_runtime_trusted lachesis_model lachesis_runtime
 lachesis_runtime_trusted_DIR := $(ROOT_DIR)/src/runtime/trusted
-lachesis_runtime_DIR := $(ROOT_DIR)/src/runtime
 lachesis_model_DIR := $(ROOT_DIR)/src/model
-NOCHEAT_CRATES := lachesis_runtime lachesis_model
+lachesis_runtime_DIR := $(ROOT_DIR)/src/runtime
+NOCHEAT_CRATES := lachesis_model lachesis_runtime
 TRUSTED_DIRS := $(lachesis_runtime_trusted_DIR)
 include ../../dep/verus-bpf/rules.mk
 ```
 
-`SRC`, `USER_MANIFEST` and `USER_CORE_SRC` are relative to the program
-directory. `KEEP_SYMS` is what `opt` may not internalize: the struct_ops
-map, its entry points, the license, and anything userspace reads back out
-of the maps, which today means the policy's own static. Set
-`USER_MANIFEST` and the pipeline also builds a binary named `$(PROG)` out
-of that cargo project; set `USER_CORE_SRC` and `USER_CORE_NAME` and it
-also verifies that crate with `--no-cheating`. The consumer also declares its crate order, trust boundaries, and target
-kernel; generic compilation machinery belongs in verus-bpf.
+`SRC`, `MUTANTS`, `USER_MANIFEST` and `USER_CORE_SRC` are relative to the
+program directory. `KEEP_SYMS` is what `opt` may not internalize: the
+struct_ops map, its entry points, the license, and anything userspace
+reads back out of the maps, which today means the policy's own static.
+`MUTANTS` lists unified diffs against `SRC`: `verify` applies each to a
+copy of the policy, runs the policy's own pass on it, and fails unless
+Verus rejects it with a verification error -- a mutant that does not
+compile is a failure too, because it says nothing about the contracts.
+Set `USER_MANIFEST` and the pipeline also builds a binary named `$(PROG)`
+out of that cargo project; set `USER_CORE_SRC` and `USER_CORE_NAME` and it
+also verifies that crate with `--no-cheating`. The consumer also declares
+its crate order, trust boundaries, and target kernel; generic compilation
+machinery belongs in verus-bpf.
 
 ## Writing a policy
 
@@ -157,37 +173,55 @@ The state is a struct and the callbacks are an `impl Policy`, both inside
 ```rust
 verus! {
 
-const QUEUED: usize = 1;
+broadcast use refine::group_refine;
+
+const OWN: usize = 2;
 
 pub struct Lachesis {
     vtime_now: AtomicU64,
+    nr_queued: Counter,
     stats: Stats<7>,
+    claimed: Claims<64>,
 }
 
 impl Policy for Lachesis {
-    fn enqueue(&self, p: Task, enq_flags: u64) {
-        let vtime = clamp_vtime(p.vtime(), self.vtime_now.load(), SCX_SLICE_DFL);
-        let cpu = scx::task_cpu(&p);
-        self.nr_queued.fetch_add(1);
-        let (target, is_idle) = scx::select_cpu_dfl(&p, cpu, 0);
-        let q = if is_idle { target as u32 } else { cpu as u32 };
-        self.stats.inc(QUEUED);
-        scx::dsq_insert_vtime(&p, q as u64, SCX_SLICE_DFL, vtime, enq_flags);
-        if is_idle {
-            scx::kick_cpu(target, SCX_KICK_IDLE);
-        }
+    fn dequeue(&self, _p: Task, _deq_flags: u64, log: &mut Log) {
+        self.nr_queued.dec(log);
     }
 }
 
 } // verus!
 ```
 
-The `Policy` trait in `src/runtime/policy.rs` declares every struct_ops member a
-policy may implement, one method per callback, each with a default body, so
-a policy writes only the callbacks it cares about. Contracts are declared
-on the trait and inherited by the `impl`: Verus rejects a `requires` on a
-trait method *implementation*, so each contract is stated in exactly one
-place and a policy never quotes one.
+Every callback takes `log: &mut Log`, the receipt log. It is ghost: each
+trusted wrapper whose effect the model cares about -- the count, the idle
+search, a kick, a queue read, a claim, a busy flag, an insert, a move --
+appends one `Op` naming the call and what the kernel returned, and in the
+erased pass the log is a zero-sized struct. The `Policy` trait's
+`ensures` for a callback is a predicate over the ops it appended, stated
+in `src/model/refine.rs` as an automaton the ops must drive to its end:
+`dequeue`'s says exactly one `CountDec` was appended, which
+`Counter::dec` does; `enqueue`'s says the task's CPU and the CPU count
+were read, the count published, the idle search run with every claimed
+CPU kicked, and one insert made on the right queue; `dispatch`'s says the
+own queue was tried first and the scan read every other CPU's busy flag
+in order, its queue only when busy, and moved only from a queue that read
+non-empty. A callback that does something the contract does not allow, in
+an order it does not allow, or stops early, fails to verify. This is how
+the policy is checked against the model without being written into it:
+the model was proved over these action shapes, and the contracts are
+those shapes.
+
+The `Policy` trait in `src/runtime/policy.rs` declares every struct_ops
+member a policy may implement, one method per callback. The six the model
+has an action for -- `enqueue`, `dequeue`, `dispatch`, `running`,
+`stopping`, `update_idle` -- carry a refinement contract and have no
+default body, because a do-nothing callback is what the contracts forbid;
+the rest have defaults, and `select_cpu`'s contract is that the default
+is all it may do. Contracts are declared on the trait and inherited by
+the `impl`: Verus rejects a `requires` on a trait method
+*implementation*, so each contract is stated in exactly one place and a
+policy never quotes one.
 
 A `requires` on a trait method is an assumption about what the kernel
 passes in. The `scheduler!` trampolines that call the impl are C-ABI entry
@@ -206,11 +240,16 @@ Verus and cannot be named from checked code.
 
 A loop in a callback carries an `invariant` and a `decreases`, and Verus
 verifies its body in isolation: a fact the body relies on -- the trait's
-`cpu >= 0`, say, when the body kicks that CPU -- is restated in the
-invariant or it is not there. Every scan is bounded by the constant
-`MAX_CPUS`, which is a bound the BPF verifier can see too; the
-64-iteration steal in `dispatch` costs it about eighty thousand
-instructions of the million it allows.
+`cpu >= 0`, say, when the body kicks that CPU, or that the ghost `pre`
+taken at the top of the callback is `old(log).ops@`, when the body
+returns -- is restated in the invariant or it is not there. The
+automaton's state at the loop head is an `invariant_except_break` (the
+placement `break` leaves it elsewhere) and what every exit leaves behind
+is the loop's `ensures`; `refine::searching` and `refine::scanning` are
+those two invariant shapes, so the policy states them in one line each.
+Every scan is bounded by the constant `MAX_CPUS`, which is a bound the
+BPF verifier can see too; the 64-iteration steal in `dispatch` costs it
+about eighty thousand instructions of the million it allows.
 
 `scheduler!` wires the impl to the kernel:
 
@@ -449,14 +488,24 @@ So the BPF side copies the two fields that matter into its own static:
   toolchain matrix; the short version is that `rustc` is Verus's pin and its
   LLVM must not be newer than the LLVM tools.
 - Four crates, in dependency order: `lachesis_runtime_trusted`,
-  `lachesis_runtime`, `lachesis_model`, then the policy. `make verify`
+  `lachesis_model`, `lachesis_runtime`, then the policy. `make verify`
   (or `make -C src/sched verify`) runs Verus over each in turn and fails
   unless each reports `0 errors`; each exports its proofs as a `.vir`
   that the next ones import. All four erased compiles depend on all four
   passes, so `make lachesis` verifies before it compiles, and prints the
-  trusted line count when it is done. The model imports the two runtime
-  crates only because the pipeline hands every library its predecessors;
-  it names nothing from them.
+  trusted line count when it is done. The model imports the trusted crate
+  for the `Op` type its contracts range over, and the runtime imports the
+  model for the contracts its `Policy` trait states; the `refine` module
+  and the prelude's re-export of it exist only under `verus_keep_ghost`,
+  and nothing outside a `verus!` block names them.
+- `make verify` then applies every patch in `src/sched/bpf/mutants/` to a
+  copy of the policy and runs the same pass on it, and fails unless Verus
+  rejects each with a verification error, reported one per line as
+  `mutant <name>`. The ten there reproduce known bugs -- the two the
+  Ipanema paper found in CFS, the traces TLC found while this design was
+  being built, an off-by-one -- and each patch's header says which step
+  of which contract it breaks. `make -C src/sched verify-mutants` runs
+  only those; a new mutant is a new patch, nothing else.
 - A fifth pass, `lachesis_control`, runs beside them and is reported on
   its own line. It is a leaf: it imports none of the other crates, so it
   names no rlibs and no search paths, and it runs with `--no-cheating`

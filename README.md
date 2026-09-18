@@ -36,11 +36,16 @@ The model carries the first whole-scheduler theorem: concurrent work
 conservation in the sense of the Ipanema paper, restated for sched_ext and
 proved as an inductive invariant. A TLA+ mirror of the same model checks it
 with TLC and shows that four weakened variants of the policy violate it.
-Starvation freedom and bounded fairness remain goals, and the correspondence
-between the model's actions and the compiled callbacks is by construction
-rather than checked. Kernel bindings and their assumed contracts live in an
-explicit trusted base; the loader and compilation pipeline are also outside
-the proofs.
+The compiled callbacks are checked against that model: every trusted
+wrapper leaves a ghost receipt, the `Policy` trait's contracts say which
+sequences of receipts the model's actions allow, and Verus proves the
+policy produces one. Ten variants of the policy that reproduce known
+scheduler bugs, among them the two the Ipanema paper found in CFS, are
+rejected by those contracts on every build. Starvation freedom and bounded
+fairness remain goals, and the link between the contracts and the model's
+actions is by construction rather than a theorem. Kernel bindings and
+their assumed contracts live in an explicit trusted base; the loader and
+compilation pipeline are also outside the proofs.
 
 ## Build and run
 
