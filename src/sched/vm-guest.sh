@@ -21,6 +21,8 @@ BIN=${1:?usage: vm-guest.sh <binary> <object> <output-dir> [seconds]}
 OBJ=${2:?usage: vm-guest.sh <binary> <object> <output-dir> [seconds]}
 OUTDIR=${3:?usage: vm-guest.sh <binary> <object> <output-dir> [seconds]}
 SECS=${4:-5}
+# A fifth argument turns the trace recorder on; the file lands beside the log.
+TRACE=${5:-}
 BPFTOOL=${BPFTOOL:-/usr/sbin/bpftool}
 VERIFY_PIN=/sys/fs/bpf/lachesis_verify
 SCX=/sys/kernel/sched_ext
@@ -92,8 +94,16 @@ for _ in $(seq $(( 2 * ncpu ))); do
 		'while :; do i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done; sleep 0.003; done' &
 done
 
-hdr "run: lachesis --duration $SECS --interval 1"
-"$BIN" --obj "$OBJ" --duration "$SECS" --interval 1
+TRACE_ARGS=()
+if [ -n "${TRACE:-}" ]; then
+	TRACE_ARGS=(--trace "$OUTDIR/trace.bin")
+fi
+if [ -n "$TRACE" ]; then
+	hdr "tasks before the run (pid, cpu, comm), for the trace's pids"
+	ps -eo pid,psr,comm --no-headers | tr -s ' ' | head -200
+fi
+hdr "run: lachesis --duration $SECS --interval 1 ${TRACE_ARGS[*]}"
+"$BIN" --obj "$OBJ" --duration "$SECS" --interval 1 "${TRACE_ARGS[@]}"
 rc=$?
 echo "lachesis rc=$rc"
 wait

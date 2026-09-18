@@ -25,6 +25,7 @@ pub struct sched_ext_entity {
 #[btf]
 pub struct task_struct {
     scx: sched_ext_entity,
+    pid: i32,
 }
 
 /// `enum scx_exit_kind`, mirrored from `kernel/sched/ext/internal.h`.
@@ -130,6 +131,13 @@ impl Task {
             1 <= r <= 10000,
     {
         *self.view().scx().weight().get().unwrap()
+    }
+
+    /// `p->pid`, for the trace recorder's begin event. No contract: it is
+    /// a label.
+    #[verifier::external_body]
+    pub fn pid(&self) -> (r: i32) {
+        *self.view().pid().get().unwrap()
     }
 
     /// Write `p->scx.dsq_vtime` through the CO-RE relocated offset. The

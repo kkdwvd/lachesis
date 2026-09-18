@@ -129,6 +129,7 @@ help:
 		'  verify             Verus over every crate: runtime, policy, control' \
 		'  lachesis           Verify and build; links ./lachesis to the loader' \
 		'  lachesis-run       Boot a VM, run the loader as its scheduler' \
+		'                     (LACHESIS_TRACE=1 records build/lachesis/trace.bin)' \
 		'  lachesis-clean     Remove the lachesis build outputs' \
 		'  rust-project       Write rust-project.json for rust-analyzer' \
 		'  tlc                TLC over the TLA+ work-conservation model and its variants' \

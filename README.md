@@ -44,7 +44,9 @@ code's granularity; refining it to that found three races in the design,
 each closed and each kept as a rejected variant. Thirteen variants of the
 policy that reproduce known scheduler bugs, among them the two the
 Ipanema paper found in CFS, are rejected by those contracts on every
-build. Starvation freedom and bounded
+build. The same receipts can be recorded at runtime through a ring buffer
+and replayed against the contracts and the model, which is how the model
+is checked against what the kernel actually did. Starvation freedom and bounded
 fairness remain goals, and the link between the contracts and the model's
 actions is by construction rather than a theorem. Kernel bindings and
 their assumed contracts live in an explicit trusted base; the loader and

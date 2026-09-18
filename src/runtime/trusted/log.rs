@@ -11,11 +11,12 @@
 //! consuming from it or dispatches straight to a local DSQ leaves a
 //! sequence the contract rejects, and Verus says so.
 //!
-//! The log's only field is ghost: in the erased pass it is a zero-sized
-//! struct, so nothing of it reaches the object but an argument the
-//! optimizer removes. What is trusted is that each wrapper appends the op
-//! that describes what the kernel did, which is the same assumption as the
-//! wrapper's other postconditions.
+//! The log's sequence is ghost; what the erased pass keeps is two bytes,
+//! the callback's id and whether tracing is on, so that the same receipts
+//! can go out through the trace recorder in [`crate::trace`] at runtime.
+//! What is trusted is that each wrapper records the op that describes what
+//! the kernel did, which is the same assumption as the wrapper's other
+//! postconditions.
 
 use crate::vprelude::*;
 
@@ -66,35 +67,96 @@ pub enum Op {
     TestAndClearIdle { cpu: i32, was: bool },
 }
 
+/// The callback a log belongs to, on the wire of the trace.
+pub const CB_SELECT_CPU: u8 = 1;
+pub const CB_ENQUEUE: u8 = 2;
+pub const CB_DEQUEUE: u8 = 3;
+pub const CB_DISPATCH: u8 = 4;
+pub const CB_RUNNING: u8 = 5;
+pub const CB_STOPPING: u8 = 6;
+pub const CB_ENABLE: u8 = 7;
+pub const CB_UPDATE_IDLE: u8 = 8;
+pub const CB_INIT: u8 = 9;
+pub const CB_EXIT: u8 = 10;
+
 /// The receipts of one callback, in order. Exec-typed so that it can be
-/// passed as `&mut` through code the erased pass compiles; its one field
-/// is ghost.
+/// passed as `&mut` through code the erased pass compiles; `ops` is ghost,
+/// and `cb` and `on` are the two bytes the trace recorder needs.
 #[cfg(verus_keep_ghost)]
 pub struct Log {
+    pub cb: u8,
+    pub on: bool,
     pub ops: Ghost<Seq<Op>>,
 }
 
 #[cfg(verus_keep_ghost)]
 impl Log {
-    /// A fresh log: what the trampoline hands a callback.
-    pub fn new() -> (l: Log)
+    /// A fresh log: what the trampoline hands a callback. Opens the
+    /// callback on the trace when tracing is on.
+    #[verifier::external_body]
+    pub fn new(cb: u8, pid: i32) -> (l: Log)
         ensures
             l.ops@ == Seq::<Op>::empty(),
     {
-        Log { ops: Ghost(Seq::empty()) }
+        let on = crate::trace::enabled();
+        if on {
+            crate::trace::begin(cb, pid);
+        }
+        Log { cb, on, ops: Ghost(Seq::empty()) }
+    }
+
+    /// One receipt: what every wrapper appends, and the trace's event.
+    #[verifier::external_body]
+    pub fn record(&mut self, op: Op)
+        ensures
+            final(self).ops@ == old(self).ops@.push(op),
+    {
+        if self.on {
+            crate::trace::record(self.cb, &op);
+        }
+        self.ops = Ghost(self.ops@.push(op));
+    }
+
+    /// The callback returned.
+    #[verifier::external_body]
+    pub fn end(&self) {
+        if self.on {
+            crate::trace::end(self.cb);
+        }
     }
 }
 
 } // verus!
 
-/// The erased pass sees a zero-sized log with no fields at all.
+/// The erased pass sees the two exec bytes and no ghost field.
 #[cfg(not(verus_keep_ghost))]
-pub struct Log {}
+pub struct Log {
+    pub cb: u8,
+    pub on: bool,
+}
 
 #[cfg(not(verus_keep_ghost))]
 impl Log {
     #[inline(always)]
-    pub fn new() -> Log {
-        Log {}
+    pub fn new(cb: u8, pid: i32) -> Log {
+        let on = crate::trace::enabled();
+        if on {
+            crate::trace::begin(cb, pid);
+        }
+        Log { cb, on }
+    }
+
+    #[inline(always)]
+    pub fn record(&mut self, op: Op) {
+        if self.on {
+            crate::trace::record(self.cb, &op);
+        }
+    }
+
+    #[inline(always)]
+    pub fn end(&self) {
+        if self.on {
+            crate::trace::end(self.cb);
+        }
     }
 }

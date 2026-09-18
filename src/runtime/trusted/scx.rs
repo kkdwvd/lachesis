@@ -73,6 +73,7 @@ pub fn select_cpu_dfl(
     let cpu = unsafe {
         kfunc::scx_bpf_select_cpu_dfl(p.as_ptr(), prev_cpu, wake_flags, &mut is_idle)
     };
+    log.record(Op::SelectDfl { cpu, idle: is_idle });
     (cpu, is_idle)
 }
 
@@ -83,6 +84,7 @@ pub fn dsq_insert(p: &Task, dsq_id: u64, slice: u64, enq_flags: u64, log: &mut L
         final(log).ops@ == old(log).ops@.push(Op::Insert { dsq: dsq_id }),
 {
     unsafe { kfunc::scx_bpf_dsq_insert(p.as_ptr(), dsq_id, slice, enq_flags) }
+    log.record(Op::Insert { dsq: dsq_id });
 }
 
 /// Insert `p` into `dsq_id` ordered by `vtime`.
@@ -99,6 +101,7 @@ pub fn dsq_insert_vtime(
         final(log).ops@ == old(log).ops@.push(Op::Insert { dsq: dsq_id }),
 {
     unsafe { kfunc::scx_bpf_dsq_insert_vtime(p.as_ptr(), dsq_id, slice, vtime, enq_flags) }
+    log.record(Op::Insert { dsq: dsq_id });
 }
 
 /// Move one task that may run on this CPU from `dsq_id` to the local DSQ
@@ -111,7 +114,9 @@ pub fn dsq_move_to_local(dsq_id: u64, log: &mut Log) -> (r: bool)
     ensures
         final(log).ops@ == old(log).ops@.push(Op::MoveToLocal { dsq: dsq_id, moved: r }),
 {
-    unsafe { kfunc::scx_bpf_dsq_move_to_local(dsq_id) }
+    let r = unsafe { kfunc::scx_bpf_dsq_move_to_local(dsq_id) };
+    log.record(Op::MoveToLocal { dsq: dsq_id, moved: r });
+    r
 }
 
 /// The number of tasks in `dsq_id` at some instant during the call, or a
@@ -127,7 +132,9 @@ pub fn dsq_nr_queued(dsq_id: u64, log: &mut Log) -> (r: i32)
     ensures
         final(log).ops@ == old(log).ops@.push(Op::NrQueued { dsq: dsq_id, n: r }),
 {
-    unsafe { kfunc::scx_bpf_dsq_nr_queued(dsq_id) }
+    let r = unsafe { kfunc::scx_bpf_dsq_nr_queued(dsq_id) };
+    log.record(Op::NrQueued { dsq: dsq_id, n: r });
+    r
 }
 
 /// Kick `cpu`. With [`SCX_KICK_IDLE`] it reschedules only if idle, which
@@ -143,6 +150,7 @@ pub fn kick_cpu(cpu: i32, flags: u64, log: &mut Log)
         final(log).ops@ == old(log).ops@.push(Op::Kick { cpu: cpu }),
 {
     unsafe { kfunc::scx_bpf_kick_cpu(cpu, flags) }
+    log.record(Op::Kick { cpu });
 }
 
 /// The CPU `p` is assigned to, `task_cpu(p)`: after `ops.select_cpu` it
@@ -154,7 +162,9 @@ pub fn task_cpu(p: &Task, log: &mut Log) -> (r: i32)
         r >= 0,
         final(log).ops@ == old(log).ops@.push(Op::TaskCpu { cpu: r }),
 {
-    unsafe { kfunc::scx_bpf_task_cpu(p.as_ptr()) }
+    let r = unsafe { kfunc::scx_bpf_task_cpu(p.as_ptr()) };
+    log.record(Op::TaskCpu { cpu: r });
+    r
 }
 
 /// Atomically clear `cpu`'s bit in the kernel's idle mask and report
@@ -173,7 +183,9 @@ pub fn test_and_clear_cpu_idle(cpu: i32, log: &mut Log) -> (r: bool)
     ensures
         final(log).ops@ == old(log).ops@.push(Op::TestAndClearIdle { cpu: cpu, was: r }),
 {
-    unsafe { kfunc::scx_bpf_test_and_clear_cpu_idle(cpu) }
+    let r = unsafe { kfunc::scx_bpf_test_and_clear_cpu_idle(cpu) };
+    log.record(Op::TestAndClearIdle { cpu, was: r });
+    r
 }
 
 /// `nr_cpu_ids`, one more than the highest possible CPU number. At least
@@ -184,7 +196,9 @@ pub fn nr_cpu_ids(log: &mut Log) -> (r: u32)
         r >= 1,
         final(log).ops@ == old(log).ops@.push(Op::NrCpuIds { nr: r }),
 {
-    unsafe { kfunc::scx_bpf_nr_cpu_ids() }
+    let r = unsafe { kfunc::scx_bpf_nr_cpu_ids() };
+    log.record(Op::NrCpuIds { nr: r });
+    r
 }
 
 /// Create a user DSQ. `node` is a NUMA node or -1 for any.

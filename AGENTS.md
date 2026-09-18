@@ -47,8 +47,9 @@ them and imports none of them. The loader is verified by nothing.
   word -- free, promised, busy or scanning -- read and compare-and-swapped
   without a lock), `log.rs` (the receipt log:
   the ghost `Op` every wrapper appends, which the refinement contracts
-  are stated over) and `ops.rs` (the `scheduler!` macro and its
-  trampolines). `atomic.rs` also holds `Counter`, the published count,
+  are stated over), `trace.rs` (the same receipts at runtime: a BPF ring
+  buffer map, three helper calls, and a switch in `.bss` the loader
+  raises) and `ops.rs` (the `scheduler!` macro and its trampolines). `atomic.rs` also holds `Counter`, the published count,
   an `AtomicU64` with a role so that the log can name it.
 - `src/runtime` — `lachesis_runtime`, the checked layer every scheduler
   links: `policy.rs` (the `Policy` trait, where a callback's contract is
@@ -73,9 +74,10 @@ them and imports none of them. The loader is verified by nothing.
   first candidate, is tolerated.
 - `src/sched` — one scheduler, and everything about it that is verified:
   `bpf/main.rs` the policy, `bpf/mutants/` thirteen variants of it that
-  the contracts must reject, `control/` the crate `lachesis_control`, the
-  Makefile stub, and the `vm-run.sh`/`vm-guest.sh` pair that runs the
-  whole thing in a VM.
+  the contracts must reject, `control/` the crate `lachesis_control`,
+  `conform/check.py`, which replays a recorded trace against the
+  contracts and the model, the Makefile stub, and the
+  `vm-run.sh`/`vm-guest.sh` pair that runs the whole thing in a VM.
 - `src/loader` — `lachesis`, the userspace binary. Unverified by design,
   and its own directory so that the one thing nothing checks is one
   directory and not a file hidden inside a verified tree.
@@ -90,6 +92,7 @@ src/
     Makefile       PROG, SRC, KEEP_SYMS, MUTANTS, USER_MANIFEST, USER_CORE_*
     bpf/main.rs    the BPF policy; verified, compiled by rules.mk
     bpf/mutants/   policies Verus must reject; `make verify` checks each
+    conform/       check.py: a recorded trace against contracts and model
     control/       lachesis_control; verified, compiled by both
     vm-run.sh vm-guest.sh
   loader/          the `lachesis` binary; unverified, compiled by cargo
@@ -355,13 +358,18 @@ on that pass like it does on the others.
 
 ```
 lachesis [--obj PATH] [--interval SECS] [--duration SECS] [--allow-host]
+         [--trace PATH]
 ```
 
 `--obj` defaults to `lachesis.o` beside the executable; the object is
 loaded from a path rather than embedded, so the two builds stay
 independent. `--interval` is the stats period, `--duration` (default 5
 seconds) detaches and exits after that long; `--duration 0` runs until
-SIGINT or SIGTERM instead.
+SIGINT or SIGTERM instead. `--trace PATH` raises `lachesis_trace_on` in
+the object's `.bss` and writes the ring buffer `lachesis_trace` to PATH
+as raw 40-byte events -- timestamp, two payload words, the CPU's event
+sequence number, pid, CPU, callback id, op kind -- which
+`src/sched/conform/check.py` reads.
 
 **`--allow-host` is the guard.** Without it the binary refuses to attach
 unless `/sys/class/dmi/id/sys_vendor` reads `QEMU`, mirroring
@@ -458,7 +466,17 @@ So the BPF side copies the two fields that matter into its own static:
   fewer than it has CPUs plus twice as many bursty tasks, so that CPUs
   keep going idle while queued work exists: that is what makes the steal
   and kick counters move. `LACHESIS_SECS`
-  (default 5) is how long the guest keeps the scheduler attached. Ctrl-C
+  (default 5) is how long the guest keeps the scheduler attached.
+  `LACHESIS_TRACE=1` turns the trace recorder on: the loader raises the
+  switch, drains the ring buffer into `build/lachesis/trace.bin`, and
+  `python3 src/sched/conform/check.py build/lachesis/trace.bin` replays
+  it -- every callback's receipts through the automata of
+  `src/model/refine.rs`, and the whole trace, ordered by timestamp,
+  through a rebuilt model state checked for the strong property. The
+  one known gap the replay shows is affinity: a per-CPU kthread the
+  kernel places only on its own CPU is filed there while another CPU
+  idles, which the model cannot produce; the checker classifies those
+  states and reports the rest as unexplained. Ctrl-C
   ends the run within about half a second and exits 130. `VM_TIMEOUT`
   (default 300) is the hard deadline for the whole run, enforced by a
   watchdog in `vm-run.sh`, and exits 124. Do not reintroduce a `timeout`

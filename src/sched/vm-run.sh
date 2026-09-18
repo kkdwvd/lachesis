@@ -204,7 +204,7 @@ set +e
 "$VNG" --run "$KERNEL" \
 	--user root --cpus "$VM_CPUS" --memory "$VM_MEM" \
 	--disable-microvm --rw \
-	-- "bash $(printf '%q' "$GUEST") $(printf '%q' "$BIN") $(printf '%q' "$OBJ") $(printf '%q' "$OUTDIR") $SECS" \
+	-- "bash $(printf '%q' "$GUEST") $(printf '%q' "$BIN") $(printf '%q' "$OBJ") $(printf '%q' "$OUTDIR") $SECS $(printf '%q' "${LACHESIS_TRACE:-}")" \
 	2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
 set -e

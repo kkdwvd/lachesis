@@ -16,6 +16,7 @@ KEEP_SYMS := lachesis_ops \
              lachesis_enable lachesis_update_idle lachesis_init \
              lachesis_exit \
              LACHESIS \
+             lachesis_trace lachesis_trace_on lachesis_trace_emit \
              _LICENSE
 
 # Policies the contracts must reject, one patch against bpf/main.rs each;

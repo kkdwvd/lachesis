@@ -126,7 +126,9 @@ pub const fn pad_name(s: &str) -> [u8; 128] {
 /// (`init`, `init_task`, `exit_task`, the cgroup ones).
 ///
 /// Adding a member means adding it to the `Policy` trait and adding a rule
-/// to `__trampoline!`; an unknown member is a `compile_error!`.
+/// to `__trampoline!`, which also names the member's trace id and the
+/// expression for the task's pid on its begin event; an unknown member is
+/// a `compile_error!`.
 #[macro_export]
 macro_rules! scheduler {
     (
@@ -180,38 +182,48 @@ macro_rules! scheduler {
 macro_rules! __trampoline {
     ($sec:literal, $inst:ident, select_cpu, $sym:ident) => {
         $crate::__entry!($sec, $inst, select_cpu, $sym,
-            (p: $crate::task::Task, prev_cpu: i32, wake_flags: u64));
+            (p: $crate::task::Task, prev_cpu: i32, wake_flags: u64),
+            $crate::log::CB_SELECT_CPU, p.pid());
     };
     ($sec:literal, $inst:ident, enqueue, $sym:ident) => {
         $crate::__entry!($sec, $inst, enqueue, $sym,
-            (p: $crate::task::Task, enq_flags: u64));
+            (p: $crate::task::Task, enq_flags: u64),
+            $crate::log::CB_ENQUEUE, p.pid());
     };
     ($sec:literal, $inst:ident, dequeue, $sym:ident) => {
         $crate::__entry!($sec, $inst, dequeue, $sym,
-            (p: $crate::task::Task, deq_flags: u64));
+            (p: $crate::task::Task, deq_flags: u64),
+            $crate::log::CB_DEQUEUE, p.pid());
     };
     ($sec:literal, $inst:ident, dispatch, $sym:ident) => {
         $crate::__entry!($sec, $inst, dispatch, $sym,
-            (cpu: i32, prev: ::core::option::Option<$crate::task::Task>));
+            (cpu: i32, prev: ::core::option::Option<$crate::task::Task>),
+            $crate::log::CB_DISPATCH, match &prev { ::core::option::Option::Some(t) => t.pid(), ::core::option::Option::None => -1 });
     };
     ($sec:literal, $inst:ident, running, $sym:ident) => {
-        $crate::__entry!($sec, $inst, running, $sym, (p: $crate::task::Task));
+        $crate::__entry!($sec, $inst, running, $sym, (p: $crate::task::Task),
+            $crate::log::CB_RUNNING, p.pid());
     };
     ($sec:literal, $inst:ident, stopping, $sym:ident) => {
         $crate::__entry!($sec, $inst, stopping, $sym,
-            (p: $crate::task::Task, runnable: bool));
+            (p: $crate::task::Task, runnable: bool),
+            $crate::log::CB_STOPPING, p.pid());
     };
     ($sec:literal, $inst:ident, enable, $sym:ident) => {
-        $crate::__entry!($sec, $inst, enable, $sym, (p: $crate::task::Task));
+        $crate::__entry!($sec, $inst, enable, $sym, (p: $crate::task::Task),
+            $crate::log::CB_ENABLE, p.pid());
     };
     ($sec:literal, $inst:ident, update_idle, $sym:ident) => {
-        $crate::__entry!($sec, $inst, update_idle, $sym, (cpu: i32, idle: bool));
+        $crate::__entry!($sec, $inst, update_idle, $sym, (cpu: i32, idle: bool),
+            $crate::log::CB_UPDATE_IDLE, -1);
     };
     ($sec:literal, $inst:ident, exit, $sym:ident) => {
-        $crate::__entry!($sec, $inst, exit, $sym, (ei: &$crate::task::ExitInfo));
+        $crate::__entry!($sec, $inst, exit, $sym, (ei: &$crate::task::ExitInfo),
+            $crate::log::CB_EXIT, -1);
     };
     ($sec:literal, $inst:ident, init, $sym:ident) => {
-        $crate::__entry!($sec, $inst, init, $sym, ());
+        $crate::__entry!($sec, $inst, init, $sym, (),
+            $crate::log::CB_INIT, -1);
     };
     ($sec:literal, $inst:ident, $m:ident, $sym:ident) => {
         ::core::compile_error!(::core::concat!(
@@ -224,7 +236,8 @@ macro_rules! __trampoline {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __entry {
-    ($sec:literal, $inst:ident, $m:ident, $sym:ident, ($($a:ident : $t:ty),*)) => {
+    ($sec:literal, $inst:ident, $m:ident, $sym:ident, ($($a:ident : $t:ty),*),
+     $cb:expr, $pid:expr) => {
         #[link_section = ::core::concat!($sec, "/", ::core::stringify!($sym))]
         #[no_mangle]
         #[allow(unused_variables, unused_mut, unused_assignments)]
@@ -240,9 +253,12 @@ macro_rules! __entry {
             // Method-call syntax: the `Policy` trait comes in through the
             // policy crate's prelude, and this crate cannot name it -- it
             // is the dependency, not the dependent. Every callback also gets
-            // a fresh receipt log; it is a zero-sized struct in the object.
-            let mut log = $crate::log::Log::new();
-            $crate::ops::IntoRet::into_ret($inst.$m($($a,)* &mut log))
+            // a fresh receipt log, two bytes in the object: which callback,
+            // for the trace recorder, and whether tracing is on.
+            let mut log = $crate::log::Log::new($cb, $pid);
+            let r = $crate::ops::IntoRet::into_ret($inst.$m($($a,)* &mut log));
+            log.end();
+            r
         }
     };
 }

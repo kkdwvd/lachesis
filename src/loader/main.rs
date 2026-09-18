@@ -18,8 +18,11 @@
 //! and the code into its `.bss`, and the loop below reads them back out.
 
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File};
 use std::path::PathBuf;
+use std::cell::{Cell, RefCell};
+use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -28,7 +31,7 @@ use libbpf_rs::btf::types::{
     Array, Composite, DataSec, Enum, Enum64, Float, Int, MemberAttr, Ptr, Var,
 };
 use libbpf_rs::btf::{Btf, BtfType, HasSize, ReferencesType};
-use libbpf_rs::{MapCore, MapFlags, MapType, ObjectBuilder, PrintLevel};
+use libbpf_rs::{MapCore, MapFlags, MapType, ObjectBuilder, PrintLevel, RingBuffer, RingBufferBuilder};
 use lachesis_control::{classify_exit, ExitClass};
 
 const USAGE: &str = "\
@@ -44,6 +47,8 @@ on the way out.
   --duration SECS   detach and exit after this long (default: 5);
                     0 runs until SIGINT or SIGTERM
   --allow-host      attach even when this is not a QEMU guest
+  --trace PATH      record every callback's receipts to PATH, as raw
+                    40-byte events; src/sched/conform/check.py reads them
   -h, --help        print this and exit
 
 Without --allow-host the loader refuses to attach unless
@@ -63,9 +68,14 @@ const VTIME_FIELD: &str = "vtime_now";
 const NR_QUEUED_FIELD: &str = "nr_queued";
 /// Per-CPU state the policy publishes for its own use; not counters, and
 /// too wide to print. Matched on the field name one level up from the leaf.
-const PER_CPU_FIELDS: [&str; 1] = ["words"];
+const PER_CPU_FIELDS: [&str; 2] = ["words", "lachesis_trace_seq"];
 const EXIT_KIND_FIELD: &str = "exit_kind";
 const EXIT_CODE_FIELD: &str = "exit_code";
+/// The trace recorder's switch, a `.bss` variable of the trusted crate
+/// rather than a field of the policy's static; written from here.
+const TRACE_ON_FIELD: &str = "lachesis_trace_on";
+/// The trace recorder's ring buffer map.
+const TRACE_MAP: &str = "lachesis_trace";
 
 /// A leaf's name without the variable and struct path in front of it, which
 /// is what the three names above are matched against: the decoded names are
@@ -104,6 +114,7 @@ struct Args {
     interval: Duration,
     duration: Duration,
     allow_host: bool,
+    trace: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -113,6 +124,7 @@ fn parse_args() -> Result<Args, String> {
     let mut interval = 1u64;
     let mut duration = 5u64;
     let mut allow_host = false;
+    let mut trace = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -133,6 +145,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--duration: {e}"))?
             }
             "--allow-host" => allow_host = true,
+            "--trace" => trace = Some(PathBuf::from(value("--trace")?)),
             "-h" | "--help" => {
                 print!("{USAGE}");
                 process::exit(0);
@@ -157,6 +170,7 @@ fn parse_args() -> Result<Args, String> {
         interval: Duration::from_secs(interval),
         duration: Duration::from_secs(duration),
         allow_host,
+        trace,
     })
 }
 
@@ -355,6 +369,7 @@ fn counter_names(leaves: &[Leaf]) -> Vec<&str> {
             !matches!(
                 tail(&l.name),
                 VTIME_FIELD | NR_QUEUED_FIELD | EXIT_KIND_FIELD | EXIT_CODE_FIELD
+                    | TRACE_ON_FIELD
             ) && !is_busy_leaf(&l.name)
         })
         .map(|l| l.name.as_str())
@@ -380,6 +395,7 @@ fn sample(leaves: &[Leaf], value: &[u8]) -> Sample {
             NR_QUEUED_FIELD => s.nr_queued = v,
             EXIT_KIND_FIELD => s.exit_kind = v,
             EXIT_CODE_FIELD => s.exit_code = v,
+            TRACE_ON_FIELD => {}
             _ => {
                 if n < MAX_COUNTERS {
                     s.counters[n] = v;
@@ -514,6 +530,42 @@ fn run() -> Result<i32, String> {
         Ok(sample(&leaves, &value))
     };
 
+    // The trace recorder: raise the switch in `.bss`, then drain the ring
+    // buffer into the file for as long as the scheduler is attached. The
+    // sink reports what it wrote when it is dropped, on every exit path.
+    let sink = match &args.trace {
+        Some(path) => Some(TraceSink::open(path)?),
+        None => None,
+    };
+    let trace_map = obj.maps().find(|m| m.name().to_string_lossy() == TRACE_MAP);
+    let mut rb = None;
+    if let Some(sink) = &sink {
+        let map = trace_map
+            .as_ref()
+            .ok_or(format!("the object has no {TRACE_MAP} map; was it built with the recorder?"))?;
+        let mut builder = RingBufferBuilder::new();
+        builder
+            .add(map, |data: &[u8]| sink.write(data))
+            .map_err(|e| format!("cannot attach to {TRACE_MAP}: {e}"))?;
+        rb = Some(
+            builder
+                .build()
+                .map_err(|e| format!("cannot build the ring buffer: {e}"))?,
+        );
+        let leaf = leaves
+            .iter()
+            .find(|l| tail(&l.name) == TRACE_ON_FIELD)
+            .ok_or(format!("the object's .bss has no {TRACE_ON_FIELD}"))?;
+        let mut value = bss
+            .lookup(&0u32.to_ne_bytes(), MapFlags::ANY)
+            .map_err(|e| format!("cannot read .bss: {e}"))?
+            .ok_or("the .bss map has no entry 0")?;
+        value[leaf.offset..leaf.offset + 8].copy_from_slice(&1u64.to_ne_bytes());
+        bss.update(&0u32.to_ne_bytes(), &value, MapFlags::ANY)
+            .map_err(|e| format!("cannot raise {TRACE_ON_FIELD}: {e}"))?;
+        println!("trace: recording to {}", sink.path.display());
+    }
+
     let start = Instant::now();
     let mut prev = read()?;
     let mut next = start + args.interval;
@@ -524,7 +576,7 @@ fn run() -> Result<i32, String> {
             break;
         }
         if Instant::now() < next {
-            std::thread::sleep(TICK);
+            idle(&rb);
             continue;
         }
         next += args.interval;
@@ -558,6 +610,9 @@ fn run() -> Result<i32, String> {
         prev = now;
     }
 
+    if let Some(rb) = &rb {
+        let _ = rb.consume();
+    }
     if let Some(s) = ejected {
         println!("ejected while attached; not detaching");
         return Ok(report_exit(&s));
@@ -574,6 +629,9 @@ fn run() -> Result<i32, String> {
         if s.exit_kind != 0 {
             let code = report_exit(&s);
             println!("state={} after detach", scx_attr("state"));
+            if let Some(rb) = &rb {
+                let _ = rb.consume();
+            }
             return Ok(code);
         }
         if Instant::now() >= deadline {
@@ -582,7 +640,45 @@ fn run() -> Result<i32, String> {
                 EXIT_WAIT.as_secs()
             ));
         }
-        std::thread::sleep(TICK);
+        idle(&rb);
+    }
+}
+
+/// One tick of waiting: drain the ring buffer if there is one, else sleep.
+fn idle(rb: &Option<RingBuffer<'_>>) {
+    match rb {
+        Some(rb) => {
+            let _ = rb.poll(TICK);
+        }
+        None => std::thread::sleep(TICK),
+    }
+}
+
+/// The trace file: raw events appended as the ring buffer hands them over.
+struct TraceSink {
+    path: PathBuf,
+    out: RefCell<BufWriter<File>>,
+    events: Cell<u64>,
+}
+
+impl TraceSink {
+    fn open(path: &Path) -> Result<TraceSink, String> {
+        let f = File::create(path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+        Ok(TraceSink { path: path.to_path_buf(), out: RefCell::new(BufWriter::new(f)), events: Cell::new(0) })
+    }
+
+    fn write(&self, data: &[u8]) -> i32 {
+        if self.out.borrow_mut().write_all(data).is_ok() {
+            self.events.set(self.events.get() + 1);
+        }
+        0
+    }
+}
+
+impl Drop for TraceSink {
+    fn drop(&mut self) {
+        let _ = self.out.borrow_mut().flush();
+        println!("trace: {} events written to {}", self.events.get(), self.path.display());
     }
 }
 

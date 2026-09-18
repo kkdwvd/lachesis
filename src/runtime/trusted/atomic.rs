@@ -74,7 +74,8 @@ impl Counter {
         ensures
             final(log).ops@ == old(log).ops@.push(Op::CountInc),
     {
-        self.inner.fetch_add(1, Relaxed);
+        self.inner.fetch_add(1, SeqCst);
+        log.record(Op::CountInc);
     }
 
     #[verifier::external_body]
@@ -82,7 +83,8 @@ impl Counter {
         ensures
             final(log).ops@ == old(log).ops@.push(Op::CountDec),
     {
-        self.inner.fetch_sub(1, Relaxed);
+        self.inner.fetch_sub(1, SeqCst);
+        log.record(Op::CountDec);
     }
 
     #[verifier::external_body]
@@ -90,7 +92,9 @@ impl Counter {
         ensures
             final(log).ops@ == old(log).ops@.push(Op::CountLoad { count: r }),
     {
-        self.inner.load(Relaxed)
+        let r = self.inner.load(Relaxed);
+        log.record(Op::CountLoad { count: r });
+        r
     }
 }
 

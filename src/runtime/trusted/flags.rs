@@ -66,7 +66,9 @@ impl<const N: usize> Words<N> {
         let r = match self.words.get(i) {
             Some(w) => w.compare_exchange(FREE, PROMISED, SeqCst, SeqCst).is_ok(),
             None => false,
-        }
+        };
+        log.record(Op::Promise { slot: i, ok: r });
+        r
     }
 
     /// A task is running on slot `i`.
@@ -80,6 +82,7 @@ impl<const N: usize> Words<N> {
         if let Some(w) = self.words.get(i) {
             w.store(BUSY, Relaxed);
         }
+        log.record(Op::SetBusy { slot: i });
     }
 
     /// Guard slot `i` for a steal: free becomes scanning, and the result
@@ -95,7 +98,9 @@ impl<const N: usize> Words<N> {
         let r = match self.words.get(i) {
             Some(w) => w.compare_exchange(FREE, SCANNING, SeqCst, SeqCst).is_ok(),
             None => false,
-        }
+        };
+        log.record(Op::Scan { slot: i, ok: r });
+        r
     }
 
     /// The task promised to slot `i` was taken by the caller: promised
@@ -110,6 +115,7 @@ impl<const N: usize> Words<N> {
         if let Some(w) = self.words.get(i) {
             let _ = w.compare_exchange(PROMISED, FREE, SeqCst, SeqCst);
         }
+        log.record(Op::Unpromise { slot: i });
     }
 
     /// Slot `i` no longer runs a task, or its scan found nothing: free.
@@ -123,6 +129,7 @@ impl<const N: usize> Words<N> {
         if let Some(w) = self.words.get(i) {
             w.store(FREE, Relaxed);
         }
+        log.record(Op::SetFree { slot: i });
     }
 
     /// Read whether slot `i` is busy; stale by the time it is used.
@@ -133,10 +140,12 @@ impl<const N: usize> Words<N> {
         ensures
             final(log).ops@ == old(log).ops@.push(Op::IsBusy { slot: i, busy: r }),
     {
-        match self.words.get(i) {
+        let r = match self.words.get(i) {
             Some(w) => w.load(Relaxed) == BUSY,
             None => false,
-        }
+        };
+        log.record(Op::IsBusy { slot: i, busy: r });
+        r
     }
 }
 

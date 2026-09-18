@@ -43,6 +43,7 @@ pub mod panic;
 pub mod scx;
 pub mod stats;
 pub mod task;
+pub mod trace;
 
 /// vstd in the verification pass, the bare `verus!` macro in the erased
 /// one.
