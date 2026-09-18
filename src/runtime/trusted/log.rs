@@ -7,8 +7,9 @@
 //! `Policy` trait's contracts say which sequences of ops a callback may
 //! leave behind, in the model's terms (`lachesis_model::refine`). The
 //! policy proves it produces one; a policy that publishes after it
-//! searches, kicks nothing, steals from an idle CPU or dispatches straight
-//! to a local DSQ leaves a sequence the contract rejects, and Verus says so.
+//! searches, kicks nothing, steals from an idle CPU, clears a CPU's word on
+//! consuming from it or dispatches straight to a local DSQ leaves a
+//! sequence the contract rejects, and Verus says so.
 //!
 //! The log's only field is ghost: in the erased pass it is a zero-sized
 //! struct, so nothing of it reaches the object but an argument the
@@ -42,14 +43,21 @@ pub enum Op {
     Kick { cpu: i32 },
     /// `dsq_nr_queued(dsq)` read `n`.
     NrQueued { dsq: u64, n: i32 },
-    /// The claim mark of slot `slot` was set; `was` says whether it already was.
-    Claim { slot: usize, was: bool },
-    /// The claim mark of slot `slot` was cleared.
-    Unclaim { slot: usize },
-    /// The busy flag of slot `slot` read `busy`.
-    BusyGet { slot: usize, busy: bool },
-    /// The busy flag of slot `slot` was written `busy`.
-    BusySet { slot: usize, busy: bool },
+    /// The word of slot `slot` was compare-and-swapped from free to
+    /// promised; `ok` says whether it went through.
+    Promise { slot: usize, ok: bool },
+    /// The word of slot `slot` was compare-and-swapped from free to
+    /// scanning; `ok` says whether it went through.
+    Scan { slot: usize, ok: bool },
+    /// The word of slot `slot` was compare-and-swapped from promised to
+    /// free.
+    Unpromise { slot: usize },
+    /// The word of slot `slot` was written busy.
+    SetBusy { slot: usize },
+    /// The word of slot `slot` was written free.
+    SetFree { slot: usize },
+    /// The word of slot `slot` was read; `busy` says whether it was busy.
+    IsBusy { slot: usize, busy: bool },
     /// An insert into `dsq`.
     Insert { dsq: u64 },
     /// A move from `dsq` to the local DSQ; `moved` says whether one moved.

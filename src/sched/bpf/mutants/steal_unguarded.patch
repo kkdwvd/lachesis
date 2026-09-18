@@ -1,0 +1,29 @@
+# steal_unguarded: a policy the contracts must reject.
+#
+# Steal without first taking the own word from free to scanning.
+#
+# The finer-grained model's finding: a CPU reads a victim's word busy, then
+# its queue non-empty, and between the two reads a placement -- holding a
+# claim on this CPU's idle bit from its last idle period -- promises this
+# CPU a task and files it; the CPU then runs the stolen task with the
+# promised one queued behind it, while a third CPU idles with its bit up.
+# The guard makes that placement's compare-and-swap fail, and a CPU whose
+# own guard fails goes idle to wait for the landing's kick instead. The
+# dispatch automaton wants the `Scan` of the own word before the CPU count
+# is read.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -310,12 +310,6 @@
+             self.stats.inc(IDLE);
+             return;
+         }
+-        if !self.words.scan(me as usize, log) {
+-            // Promised, or still busy with an expired task: nothing to do
+-            // here but wait for the landing, or keep running.
+-            self.stats.inc(HELD);
+-            return;
+-        }
+         let n = nr_cpus(log);
+         let mut c: u32 = 0;
+         while c < n

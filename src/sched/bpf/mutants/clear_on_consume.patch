@@ -1,0 +1,30 @@
+# clear_on_consume: a policy the contracts must reject.
+#
+# `dispatch` writes the CPU's word free when it serves its own queue: the
+# design this scheduler had before the model was refined to the code's
+# granularity, with a claim mark that whoever consumed the task cleared.
+#
+# The finer-grained model's counterexample, three CPUs and three tasks: an
+# enqueue claims an idle CPU's bit and reads its queue empty, then pauses;
+# an older promise lands on that CPU, the CPU picks it up and clears the
+# mark; the paused enqueue's claim then goes through and it files its task
+# behind the runner, while a third CPU sits idle with its bit up. With the
+# word, the consumer writes nothing and `running` writes busy, so the
+# paused claim fails. The dispatch automaton ends on the move, and a write
+# after it is a step the automaton has no rule for.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -298,6 +298,12 @@
+     fn dispatch(&self, cpu: i32, _prev: Option<Task>, log: &mut Log) {
+         let ghost pre = log.ops@;
+         if scx::dsq_move_to_local(cpu as u64, log) {
++            // Served: whatever was promised to this CPU is being run, so
++            // let the next placement claim it again.
++            let served = cpu as u32;
++            if served < MAX_CPUS {
++                self.words.set_free(served as usize, log);
++            }
+             self.stats.inc(OWN);
+             return;
+         }

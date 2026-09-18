@@ -11,7 +11,7 @@
 #
 --- bpf/main.rs
 +++ bpf/main.rs
-@@ -144,8 +144,12 @@
+@@ -165,8 +165,12 @@
      /// default, which direct-dispatches to a local DSQ when it finds an
      /// idle CPU and skips `enqueue` altogether: see the header for the
      /// bubble that opens.

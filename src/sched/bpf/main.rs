@@ -24,8 +24,14 @@
 //     core: a task queued on an idle CPU is about to be run by that CPU,
 //     which has been kicked for it, and stealing it away is what let a
 //     concurrent placement land behind a stolen task in the model. The
-//     "running a task" bit is the policy's own, set by `running` and
-//     cleared by `stopping`;
+//     "running a task" state is the policy's own per-CPU word, written
+//     busy by `running` and free by `stopping`. Before it steals, a CPU
+//     takes its own word from free to scanning, and does not steal if
+//     that fails: a placement has promised it a task, and stealing
+//     something else would run that with the promised task queued behind
+//     it, which the finer-grained model found. A thief takes the victim's
+//     word from promised to free, in case the task it took was the one
+//     promised;
 //   * `enqueue` publishes the task first -- it bumps a count of queued
 //     and in-flight work before it does anything else -- and only then runs
 //     the kernel's idle search, filing the task on the CPU it claims and
@@ -35,7 +41,19 @@
 //     land on a CPU's queue between that CPU's failed dispatch and its
 //     idle bit going up, because filing on another CPU's queue takes no
 //     lock of that CPU, and a second task behind it would wait out a
-//     slice while a third CPU idles. The count is what gets published rather than
+//     slice while a third CPU idles. The placement itself is a
+//     compare-and-swap of the CPU's word from free to promised: it fails
+//     if another placement's task is on its way there, and it fails if the
+//     CPU has run something since this enqueue claimed its idle bit --
+//     between the idle search and this step the CPU may have picked up an
+//     older promise and be running it, and a mark that the consumer cleared
+//     let exactly that task be filed behind the runner, which the
+//     finer-grained model found. A claim that does not take hands over to
+//     the policy's own scan of every CPU's bit, once each in order, not to
+//     a second kernel search: the kernel may hand back a CPU this enqueue
+//     already claimed if it went idle again meanwhile, so no bound on such
+//     retries guarantees that an idle CPU whose bit stays up is ever
+//     probed, and the finer-grained model found that too. The count is what gets published rather than
 //     the DSQ insert because an insert requested from `ops.enqueue` is only
 //     marked there and lands after the callback returns, so the DSQ itself
 //     is not visible in time; `dequeue`, which the kernel calls exactly
@@ -87,6 +105,8 @@ const STEAL: usize = 3;
 const KICK_IDLE: usize = 4;
 const IDLE: usize = 5;
 const FALLBACK: usize = 6;
+const RESCAN: usize = 7;
+const HELD: usize = 8;
 
 /// The global virtual clock -- the vtime of the most recent task to run --
 /// the published count of queued and in-flight work, the counters, and
@@ -101,21 +121,22 @@ const FALLBACK: usize = 6;
 /// busy CPU's queue; dispatches served from the CPU's own queue;
 /// dispatches served by stealing; kicks `update_idle` sent to itself;
 /// dispatches that found nothing anywhere; tasks sent to the kernel's
-/// global DSQ because their CPU has no queue.
+/// global DSQ because their CPU has no queue; enqueues whose kernel pick
+/// did not take and that scanned the CPUs themselves; dispatches that
+/// found their own word not free -- promised, or busy with an expired
+/// task -- and did not steal.
 pub struct Lachesis {
     vtime_now: AtomicU64,
     nr_queued: Counter,
-    stats: Stats<7>,
+    stats: Stats<9>,
     exit_kind: AtomicU64,
     exit_code: AtomicU64,
-    /// Per CPU: a task is running there right now. Published for the
-    /// steal scan; the loader does not print it.
-    busy: Busy<64>,
-    /// Per CPU: an enqueue has claimed it and filed a task for its queue
-    /// that nobody has consumed yet. Set by the claimer, cleared by
-    /// whoever consumes from that queue; a second claimer that finds it
-    /// set kicks the CPU and looks on. Not printed either.
-    claimed: Claims<64>,
+    /// Per CPU, one word: free, idle with nothing promised; promised, an
+    /// enqueue has filed a task for its queue that has not run yet; busy,
+    /// a task is running there. `running` writes busy, `stopping` writes
+    /// free, a placement is a compare-and-swap from free, and nothing
+    /// else writes it. The loader does not print it.
+    words: Words<64>,
 }
 
 /// The number of per-CPU queues, which is the number of possible CPUs
@@ -151,16 +172,26 @@ impl Policy for Lachesis {
     /// Publish, place, file, kick. The count goes up first, because the
     /// insert below is only marked here and lands after this callback
     /// returns; the count is the one thing an idle CPU can see in time.
-    /// Then the kernel's idle search, repeated while it keeps finding idle
-    /// CPUs: each hit claims that CPU and kicks it; the first whose queue
-    /// is empty takes the task, one that already has work queued is left
-    /// to run that, and a search that finds nothing files the task on the
-    /// CPU it woke on. Either way by virtual time, clamped so an idling
-    /// task cannot bank more than one slice of budget against the tasks
-    /// that stayed runnable. This is the enqueue side of the interlock: a
-    /// CPU that went idle while this ran has either not set its idle bit
-    /// yet, in which case its `update_idle` will read the count after this
-    /// bump, or has, in which case the search sees the bit.
+    /// Then the kernel's idle search, once: it knows the topology and
+    /// prefers the task's previous CPU and its cache siblings, and what it
+    /// returns it has claimed by clearing that CPU's idle bit. The claim is
+    /// kicked, its queue read and its word compare-and-swapped from free
+    /// to promised, and if all three take, the task is filed there. If the
+    /// kernel saw nothing idle, the task goes to the CPU it woke on. If
+    /// the kernel's claim did not take -- another task on its way there, or
+    /// the CPU ran something since the bit was claimed -- the policy scans
+    /// every CPU itself, testing and clearing each bit once in order and
+    /// putting each hit through the same three steps; past the last CPU
+    /// the task goes to the CPU it woke on. Not a second kernel search:
+    /// that may hand back a CPU this enqueue already claimed, if it went
+    /// idle again meanwhile, and no bound on such retries guarantees that
+    /// an idle CPU whose bit stays up is ever probed. Insertion is by
+    /// virtual time, clamped so an idling task cannot bank more than one
+    /// slice of budget against the tasks that stayed runnable. This is
+    /// the enqueue side of the interlock: a CPU that went idle while this
+    /// ran has either not set its idle bit yet, in which case its
+    /// `update_idle` will read the count after this bump, or has, in which
+    /// case the search or the scan sees the bit.
     fn enqueue(&self, p: Task, enq_flags: u64, log: &mut Log) {
         let ghost pre = log.ops@;
         let vtime = clamp_vtime(p.vtime(), self.vtime_now.load(), SCX_SLICE_DFL);
@@ -176,46 +207,59 @@ impl Policy for Lachesis {
             return;
         }
         self.nr_queued.inc(log);
+        let (target, is_idle) = scx::select_cpu_dfl(&p, cpu, 0, log);
+        if !is_idle {
+            // Nothing idle when the kernel looked: the CPU it woke on.
+            self.stats.inc(PLACE_BUSY);
+            scx::dsq_insert_vtime(&p, cpu as u64, SCX_SLICE_DFL, vtime, enq_flags, log);
+            return;
+        }
+        // Claimed, so kicked, before anything else is asked of it.
+        scx::kick_cpu(target, SCX_KICK_IDLE, log);
+        // Ours if it has a queue, its queue is empty and its word goes
+        // from free to promised. A CPU beyond the queues cannot come back
+        // from the search after a successful `init`; it is kicked all the
+        // same.
+        if (target as u32) < n
+            && scx::dsq_nr_queued(target as u64, log) <= 0
+            && self.words.promise(target as usize, log)
+        {
+            self.stats.inc(PLACE_IDLE);
+            scx::dsq_insert_vtime(&p, target as u64, SCX_SLICE_DFL, vtime, enq_flags, log);
+            return;
+        }
+        // The kernel's pick did not take. Every CPU once, in order: a bit
+        // found up is claimed and put through the same three steps.
+        self.stats.inc(RESCAN);
         let mut q: u32 = cpu as u32;
         let mut placed_idle = false;
-        let mut tries: u32 = 0;
-        // Each pass claims one more idle CPU, so the search cannot see the
-        // same one twice and ends within `n` passes.
-        while tries < n
+        let mut j: u32 = 0;
+        while j < n
             invariant_except_break
                 q == cpu as u32,
-                refine::searching(cpu as int, n as int, tries as int,
+                refine::searching(cpu as int, n as int, j as int,
                                   refine::enq_run(refine::tail_of(pre, log.ops@))),
             invariant
-                tries <= n,
+                j <= n,
                 n <= MAX_CPUS,
                 q < n,
                 cpu >= 0,
                 refine::extends(pre, log.ops@),
             ensures
                 refine::insert_finishes(refine::enq_run(refine::tail_of(pre, log.ops@)), q as u64),
-            decreases n - tries,
+            decreases n - j,
         {
-            let (target, is_idle) = scx::select_cpu_dfl(&p, cpu, 0, log);
-            if !is_idle {
-                break;
+            if scx::test_and_clear_cpu_idle(j as i32, log) {
+                scx::kick_cpu(j as i32, SCX_KICK_IDLE, log);
+                if scx::dsq_nr_queued(j as u64, log) <= 0
+                    && self.words.promise(j as usize, log)
+                {
+                    q = j;
+                    placed_idle = true;
+                    break;
+                }
             }
-            // Claimed, so kicked, before anything else is asked of it.
-            scx::kick_cpu(target, SCX_KICK_IDLE, log);
-            // Ours if it has a queue, its queue is empty and no earlier
-            // claim is still waiting to land there; otherwise the kick
-            // alone is what it needed, and the search goes on. A CPU
-            // beyond the queues cannot come back from the search after a
-            // successful `init`; it is kicked all the same.
-            if (target as u32) < n
-                && scx::dsq_nr_queued(target as u64, log) <= 0
-                && !self.claimed.test_and_set(target as usize, log)
-            {
-                q = target as u32;
-                placed_idle = true;
-                break;
-            }
-            tries = tries + 1;
+            j = j + 1;
         }
         if placed_idle {
             self.stats.inc(PLACE_IDLE);
@@ -233,25 +277,43 @@ impl Policy for Lachesis {
     }
 
     /// Serve this CPU from its own queue, and failing that steal: for
-    /// every other CPU that is running a task, read its queue's count and
+    /// every other CPU whose word says busy, read its queue's count and
     /// move the head of the first non-empty one here. A count is stale by
     /// the time the move is attempted, so a failed move continues the scan
     /// instead of ending it; the scan ends idle only when every CPU it
     /// read was not overloaded when read. That is the exhaustiveness the
     /// work-conservation proof needs, and the thing CFS's balancer does
-    /// not do; the busy test is Ipanema's `can_steal_core`.
+    /// not do; the busy test is Ipanema's `can_steal_core`. Before the
+    /// scan, the guard: this CPU's own word from free to scanning. If that
+    /// does not take, a placement has promised this CPU a task, and the
+    /// CPU goes idle to wait for the kick that comes with its landing
+    /// rather than steal something else and run it with the promised task
+    /// queued behind it -- the finer-grained model found that trace. While
+    /// scanning, no placement can promise this CPU. A move takes the
+    /// victim's word from promised to free, in case the task taken was the
+    /// one promised to it; and a scan that finds nothing writes the own
+    /// word free again before the CPU goes idle. An own-queue hit writes
+    /// nothing: the promise a consumed task carried is fulfilled when it
+    /// runs.
     fn dispatch(&self, cpu: i32, _prev: Option<Task>, log: &mut Log) {
         let ghost pre = log.ops@;
         if scx::dsq_move_to_local(cpu as u64, log) {
-            // Whatever an enqueue claimed this CPU for, it is being served.
-            // The index is built from the 32-bit value the bound was
-            // checked on: the BPF verifier does not carry a bound on a
-            // sign-extended `i32` over to the 64-bit index.
-            let me = cpu as u32;
-            if me < MAX_CPUS {
-                self.claimed.clear(me as usize, log);
-            }
             self.stats.inc(OWN);
+            return;
+        }
+        // The index is built from the 32-bit value the bound is checked
+        // on: the BPF verifier does not carry a bound on a sign-extended
+        // `i32` over to the 64-bit index. Above the cap is unreachable
+        // after a successful `init`; there is no word to guard with.
+        let me = cpu as u32;
+        if me >= MAX_CPUS {
+            self.stats.inc(IDLE);
+            return;
+        }
+        if !self.words.scan(me as usize, log) {
+            // Promised, or still busy with an expired task: nothing to do
+            // here but wait for the landing, or keep running.
+            self.stats.inc(HELD);
             return;
         }
         let n = nr_cpus(log);
@@ -261,6 +323,8 @@ impl Policy for Lachesis {
                 c <= n,
                 n <= MAX_CPUS,
                 cpu >= 0,
+                me == cpu as u32,
+                me < MAX_CPUS,
                 // A loop body is checked on its own, so the return inside
                 // has to be told what `pre` is.
                 pre == old(log).ops@,
@@ -269,24 +333,24 @@ impl Policy for Lachesis {
                                  refine::dsp_run(cpu as int, refine::tail_of(pre, log.ops@))),
             decreases n - c,
         {
-            if c != cpu as u32
-                && self.busy.get(c as usize, log)
+            if c != me
+                && self.words.is_busy(c as usize, log)
                 && scx::dsq_nr_queued(c as u64, log) > 0
                 && scx::dsq_move_to_local(c as u64, log)
             {
-                // If that was a task an enqueue had filed there for a
-                // claim, the claim is served; the mark must not outlive it.
-                self.claimed.clear(c as usize, log);
+                self.words.unpromise(c as usize, log);
                 self.stats.inc(STEAL);
                 return;
             }
             c = c + 1;
         }
+        self.words.set_free(me as usize, log);
         self.stats.inc(IDLE);
     }
 
     /// The global clock only moves forward, to the vtime of whatever runs;
-    /// and this CPU is now busy, which is what makes its queue stealable.
+    /// and this CPU's word says busy, which is what makes its queue
+    /// stealable and what turns a placement's stale claim on it away.
     fn running(&self, p: Task, log: &mut Log) {
         let vtime = p.vtime();
         if vtime_before(self.vtime_now.load(), vtime) {
@@ -294,19 +358,20 @@ impl Policy for Lachesis {
         }
         let cpu = scx::task_cpu(&p, log) as u32;
         if cpu < MAX_CPUS {
-            self.busy.set(cpu as usize, log);
+            self.words.set_busy(cpu as usize, log);
         }
     }
 
     /// Charge the time actually consumed, scaled by weight so a heavier
     /// task advances its vtime more slowly and is picked again sooner; and
-    /// this CPU is no longer running a task, so its queue is its own to
-    /// serve until `running` says otherwise.
+    /// this CPU is no longer running a task: its word says free, so its
+    /// queue is its own to serve and a placement may claim it once it is
+    /// idle.
     fn stopping(&self, p: Task, _runnable: bool, log: &mut Log) {
         p.set_vtime(charge_vtime(p.vtime(), p.slice(), SCX_SLICE_DFL, p.weight()));
         let cpu = scx::task_cpu(&p, log) as u32;
         if cpu < MAX_CPUS {
-            self.busy.clear(cpu as usize, log);
+            self.words.set_free(cpu as usize, log);
         }
     }
 
@@ -382,8 +447,7 @@ scheduler! {
         stats: Stats::new(),
         exit_kind: AtomicU64::new(0),
         exit_code: AtomicU64::new(0),
-        busy: Busy::new(),
-        claimed: Claims::new(),
+        words: Words::new(),
     },
     ops {
         select_cpu as lachesis_select_cpu,

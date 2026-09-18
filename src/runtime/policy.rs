@@ -57,9 +57,10 @@ pub trait Policy {
     /// enqueue automaton: read the task's CPU and the CPU count; a CPU
     /// past the policy's queues goes to the global DSQ; otherwise publish
     /// first, then search, kicking every CPU the search claims, filing on
-    /// the first claimed one whose queue read empty and whose mark was
-    /// down, or on the task's own CPU once the search returned nothing or
-    /// ran its full length. One insert, and it is the last thing done.
+    /// the first claimed one whose queue read empty and whose word went
+    /// from free to promised, or on the task's own CPU once the search
+    /// returned nothing or ran its full length. One insert, and it is the
+    /// last thing done.
     fn enqueue(&self, p: Task, enq_flags: u64, log: &mut Log)
         ensures
             refine::enqueue_ok(old(log).ops@, final(log).ops@);
@@ -80,11 +81,14 @@ pub trait Policy {
 
     /// `ops.dispatch`: the local DSQ of `cpu` ran dry; move work onto it.
     /// `prev` is the task still running there, if any. The contract is the
-    /// dispatch automaton: try the own queue first and clear the own claim
-    /// mark on a hit; otherwise scan every other CPU in order, reading its
-    /// busy flag, then its queue count only if busy, then moving only if
-    /// the count was positive, and clearing that CPU's mark on a move. The
-    /// scan ends only on a move or after the last CPU.
+    /// dispatch automaton: try the own queue first; otherwise guard the own
+    /// word from free to scanning, and stop if that does not take; then
+    /// scan every other CPU in order, reading its word, then its queue
+    /// count only if the word said busy, then moving only if the count was
+    /// positive, and taking the victim's word from promised to free on a
+    /// move. The scan ends only on a move or, after the last CPU, with the
+    /// own word written free again. The promise a consumed task carried is
+    /// fulfilled when it runs, so an own-queue hit writes nothing.
     fn dispatch(&self, cpu: i32, prev: Option<Task>, log: &mut Log)
         requires
             cpu >= 0,
@@ -92,14 +96,14 @@ pub trait Policy {
             refine::dispatch_ok(cpu as int, old(log).ops@, final(log).ops@);
 
     /// `ops.running`: `p` is about to start running. The contract: the
-    /// busy flag of its CPU goes up, if the policy has one for it.
+    /// word of its CPU is written busy, if the policy has one for it.
     fn running(&self, p: Task, log: &mut Log)
         ensures
             refine::busy_ok(true, old(log).ops@, final(log).ops@);
 
     /// `ops.stopping`: `p` is coming off a CPU. `runnable` says whether it
-    /// stays runnable or is going to sleep. The contract: the busy flag of
-    /// its CPU comes down.
+    /// stays runnable or is going to sleep. The contract: the word of its
+    /// CPU is written free.
     fn stopping(&self, p: Task, runnable: bool, log: &mut Log)
         ensures
             refine::busy_ok(false, old(log).ops@, final(log).ops@);

@@ -1,6 +1,7 @@
 # late_publish: a policy the contracts must reject.
 #
-# Bump the published count after the idle search instead of before it.
+# Bump the published count after the kernel's idle search instead of
+# before it.
 #
 # The count is what an idle CPU reads in `update_idle`, and the interlock
 # is that either the enqueue's search sees the idle bit or the idle CPU's
@@ -11,19 +12,13 @@
 #
 --- bpf/main.rs
 +++ bpf/main.rs
-@@ -175,7 +175,6 @@
+@@ -206,8 +206,8 @@
              scx::dsq_insert_vtime(&p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, vtime, enq_flags, log);
              return;
          }
 -        self.nr_queued.inc(log);
-         let mut q: u32 = cpu as u32;
-         let mut placed_idle = false;
-         let mut tries: u32 = 0;
-@@ -222,6 +221,7 @@
-         } else {
-             self.stats.inc(PLACE_BUSY);
-         }
+         let (target, is_idle) = scx::select_cpu_dfl(&p, cpu, 0, log);
 +        self.nr_queued.inc(log);
-         scx::dsq_insert_vtime(&p, q as u64, SCX_SLICE_DFL, vtime, enq_flags, log);
-     }
- 
+         if !is_idle {
+             // Nothing idle when the kernel looked: the CPU it woke on.
+             self.stats.inc(PLACE_BUSY);

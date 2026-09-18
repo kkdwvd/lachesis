@@ -63,7 +63,7 @@ const VTIME_FIELD: &str = "vtime_now";
 const NR_QUEUED_FIELD: &str = "nr_queued";
 /// Per-CPU state the policy publishes for its own use; not counters, and
 /// too wide to print. Matched on the field name one level up from the leaf.
-const PER_CPU_FIELDS: [&str; 2] = ["busy", "claimed"];
+const PER_CPU_FIELDS: [&str; 1] = ["words"];
 const EXIT_KIND_FIELD: &str = "exit_kind";
 const EXIT_CODE_FIELD: &str = "exit_code";
 
@@ -71,7 +71,7 @@ const EXIT_CODE_FIELD: &str = "exit_code";
 /// is what the three names above are matched against: the decoded names are
 /// rooted at the `.bss` variable, so the policy's `vtime_now` shows up as
 /// `LACHESIS.vtime_now`.
-/// A leaf inside one of the policy's per-CPU arrays, `LACHESIS.busy[3]`.
+/// A leaf inside one of the policy's per-CPU arrays, `LACHESIS.words[3]`.
 fn is_busy_leaf(name: &str) -> bool {
     name.split('.').any(|seg| {
         PER_CPU_FIELDS.iter().any(|f| seg.strip_prefix(f).is_some_and(|r| r.starts_with('[')))

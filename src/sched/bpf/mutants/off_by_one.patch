@@ -8,7 +8,7 @@
 #
 --- bpf/main.rs
 +++ bpf/main.rs
-@@ -256,7 +256,7 @@
+@@ -318,7 +318,7 @@
          }
          let n = nr_cpus(log);
          let mut c: u32 = 0;

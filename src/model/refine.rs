@@ -9,16 +9,25 @@
 //! `Done`. What the automata demand is exactly what the invariant in
 //! `lib.rs` assumed of the policy when it was proved: publish before the
 //! idle search; kick every CPU the search claims; file the task on the
-//! first claimed CPU whose queue was empty and whose mark was down, and on
-//! the assigned CPU only after the search ran out; steal only from a CPU
-//! that is running a task, scanning every CPU in order until a move
-//! succeeds; read the count and claim the own bit before a self-kick;
-//! never dispatch from `select_cpu`. A policy that skips one of these --
-//! CFS's domain-local placement, its give-up-after-the-first-candidate
-//! balancing, a scheduler that steals from an idle CPU's queue or direct
-//! dispatches to a local DSQ -- cannot drive the automaton to `Done`, and
-//! Verus rejects the callback. `src/sched/bpf/mutants/` holds those
-//! variants and the build checks that each is rejected.
+//! first claimed CPU whose queue was empty and whose word went from free
+//! to promised, and on the assigned CPU only after the kernel's search saw
+//! nothing idle or the policy's own scan, which follows a claim that did
+//! not take and tests every CPU's bit once, ran past the last CPU; guard
+//! the own word from free to scanning before stealing, and do not steal
+//! if that does not take; steal only from a CPU whose word says busy,
+//! scanning every CPU in order until a move succeeds, take the victim's
+//! word from promised to free on a move, and write the own word free
+//! again when nothing was found; read the count and claim the own bit
+//! before a self-kick; write the word busy in `running` and free in
+//! `stopping`; never dispatch from `select_cpu`.
+//! A policy that skips one of these -- CFS's domain-local placement, its
+//! give-up-after-the-first-candidate balancing, a scheduler that steals
+//! from an idle CPU's queue, clears a CPU's word when it consumes from it,
+//! asks the kernel to search again instead of scanning, steals without
+//! guarding its own word, leaves a victim's stolen promise standing, or
+//! direct dispatches to a local DSQ -- cannot drive the automaton to
+//! `Done`, and Verus rejects the callback. `src/sched/bpf/mutants/` holds
+//! those variants and the build checks that each is rejected.
 //!
 //! The link between an automaton here and the actions in `lib.rs` is by
 //! construction: the enqueue automaton's states are the model's `ev`
@@ -96,35 +105,31 @@ pub broadcast proof fn lemma_skip_all(s: Seq<Op>)
 pub struct EnqCtx {
     pub cpu: int,
     pub cap: int,
-    pub rounds: int,
 }
 
+/// The enqueue automaton. After the publish, the kernel's pick: an idle
+/// CPU it claimed, or none. A claim -- the kernel's, or the scan's at `j`
+/// -- is kicked, then its queue is read, then its word is compare-and-
+/// swapped; a claim that does not take sends the policy to its own scan,
+/// which resumes at `next`: 0 after the kernel's pick, `j + 1` after a
+/// scan claim at `j`. The scan tests and clears each CPU's bit once, in
+/// order; past the last CPU the task goes to its own CPU. A second kernel
+/// search in place of the scan is not allowed: it may return a CPU this
+/// enqueue already claimed, if that CPU went idle again meanwhile, and no
+/// bound on such retries guarantees that an idle CPU whose bit stays up is
+/// ever probed.
 pub enum EnqSt {
     Start,
     Cpu(int),
     Ready(EnqCtx),
     Published(EnqCtx),
-    Claimed(EnqCtx, int),
-    Kicked(EnqCtx, int),
-    Empty(EnqCtx, int),
-    Marked(EnqCtx, int),
+    Claimed(EnqCtx, int, int),
+    Kicked(EnqCtx, int, int),
+    Empty(EnqCtx, int, int),
+    Promised(EnqCtx, int),
     Fallback(EnqCtx),
+    Scan(EnqCtx, int),
     Done,
-}
-
-pub open spec fn bump(x: EnqCtx) -> EnqCtx {
-    EnqCtx { cpu: x.cpu, cap: x.cap, rounds: x.rounds + 1 }
-}
-
-/// From a published state: the next round of the idle search, or the
-/// insert on the assigned CPU once the search has run its full length.
-pub open spec fn published_step(x: EnqCtx, op: Op) -> Option<EnqSt> {
-    match op {
-        Op::SelectDfl { cpu, idle } => if idle { Some(EnqSt::Claimed(x, cpu as int)) }
-                                      else { Some(EnqSt::Fallback(x)) },
-        Op::Insert { dsq } => if x.rounds >= x.cap && dsq as int == x.cpu { Some(EnqSt::Done) } else { None },
-        _ => None,
-    }
 }
 
 /// One op moves the enqueue automaton, or breaks the protocol (`None`).
@@ -135,7 +140,7 @@ pub open spec fn enq_step(st: EnqSt, op: Op) -> Option<EnqSt> {
             _ => None,
         },
         EnqSt::Cpu(c) => match op {
-            Op::NrCpuIds { nr } => Some(EnqSt::Ready(EnqCtx { cpu: c, cap: cap_of(nr), rounds: 0 })),
+            Op::NrCpuIds { nr } => Some(EnqSt::Ready(EnqCtx { cpu: c, cap: cap_of(nr) })),
             _ => None,
         },
         EnqSt::Ready(x) => match op {
@@ -145,34 +150,56 @@ pub open spec fn enq_step(st: EnqSt, op: Op) -> Option<EnqSt> {
             Op::CountInc => if x.cpu < x.cap { Some(EnqSt::Published(x)) } else { None },
             _ => None,
         },
-        EnqSt::Published(x) => published_step(x, op),
+        // the kernel's pick: a claim, or nothing idle
+        EnqSt::Published(x) => match op {
+            Op::SelectDfl { cpu, idle } => if idle { Some(EnqSt::Claimed(x, cpu as int, 0)) }
+                                          else { Some(EnqSt::Fallback(x)) },
+            _ => None,
+        },
         // a claimed CPU is kicked, whatever else happens to it; one beyond
-        // the policy's queues is only kicked, and the search goes on
-        EnqSt::Claimed(x, k) => match op {
+        // the policy's queues is only kicked, and the scan takes over
+        EnqSt::Claimed(x, k, next) => match op {
             Op::Kick { cpu } => if cpu as int != k { None }
-                                else if k >= x.cap { Some(EnqSt::Published(bump(x))) }
-                                else { Some(EnqSt::Kicked(x, k)) },
+                                else if k >= x.cap { Some(EnqSt::Scan(x, next)) }
+                                else { Some(EnqSt::Kicked(x, k, next)) },
             _ => None,
         },
-        EnqSt::Kicked(x, k) => match op {
+        EnqSt::Kicked(x, k, next) => match op {
             Op::NrQueued { dsq, n } => if dsq as int == k {
-                if n > 0 { Some(EnqSt::Published(bump(x))) } else { Some(EnqSt::Empty(x, k)) }
+                if n > 0 { Some(EnqSt::Scan(x, next)) } else { Some(EnqSt::Empty(x, k, next)) }
             } else { None },
             _ => None,
         },
-        EnqSt::Empty(x, k) => match op {
-            Op::Claim { slot, was } => if slot as int == k {
-                if was { Some(EnqSt::Published(bump(x))) } else { Some(EnqSt::Marked(x, k)) }
+        // the placement: the word goes from free to promised, or the scan
+        // goes on
+        EnqSt::Empty(x, k, next) => match op {
+            Op::Promise { slot, ok } => if slot as int == k {
+                if ok { Some(EnqSt::Promised(x, k)) } else { Some(EnqSt::Scan(x, next)) }
             } else { None },
             _ => None,
         },
-        EnqSt::Marked(x, k) => match op {
+        EnqSt::Promised(x, k) => match op {
             Op::Insert { dsq } => if dsq as int == k { Some(EnqSt::Done) } else { None },
             _ => None,
         },
         EnqSt::Fallback(x) => match op {
             Op::Insert { dsq } => if dsq as int == x.cpu { Some(EnqSt::Done) } else { None },
             _ => None,
+        },
+        // the policy's own scan: each CPU's bit once, in order; past the
+        // last, the task's own CPU
+        EnqSt::Scan(x, j) => if j >= x.cap {
+            match op {
+                Op::Insert { dsq } => if dsq as int == x.cpu { Some(EnqSt::Done) } else { None },
+                _ => None,
+            }
+        } else {
+            match op {
+                Op::TestAndClearIdle { cpu, was } => if cpu as int == j {
+                    if was { Some(EnqSt::Claimed(x, j, j + 1)) } else { Some(EnqSt::Scan(x, j + 1)) }
+                } else { None },
+                _ => None,
+            }
         },
         EnqSt::Done => None,
     }
@@ -207,10 +234,10 @@ pub open spec fn enqueue_ok(before: Seq<Op>, after: Seq<Op>) -> bool {
     extends(before, after) && enq_run(tail_of(before, after)) == Some(EnqSt::Done)
 }
 
-/// The shape of `enqueue`'s loop invariant: `rounds` rounds of the idle
-/// search done, none of them a placement.
-pub open spec fn searching(cpu: int, cap: int, rounds: int, st: Option<EnqSt>) -> bool {
-    st == Some(EnqSt::Published(EnqCtx { cpu, cap, rounds }))
+/// The shape of `enqueue`'s loop invariant: the policy's own scan is at
+/// `j`, no placement yet.
+pub open spec fn searching(cpu: int, cap: int, j: int, st: Option<EnqSt>) -> bool {
+    st == Some(EnqSt::Scan(EnqCtx { cpu, cap }, j))
 }
 
 /// What `enqueue`'s loop leaves behind on any exit: a state from which the
@@ -231,10 +258,18 @@ pub struct StealCtx {
     pub next: int,
 }
 
+/// The dispatch automaton. The own queue first; a move ends it. Then the
+/// guard: the own word from free to scanning, and if that does not take,
+/// a task is on its way and the dispatch ends without stealing. Then the
+/// scan, every other CPU in order: its word, its queue count only if the
+/// word said busy, a move only if the count was positive; a move takes
+/// the victim's word from promised to free, in case the task taken was
+/// its promise, and ends the dispatch. A scan past the last CPU writes
+/// the own word free again and ends.
 pub enum DspSt {
     Start,
     Own,
-    Served,
+    Guarded,
     Scan(StealCtx),
     Busy(StealCtx),
     Loaded(StealCtx),
@@ -253,32 +288,37 @@ pub open spec fn skip_own(x: StealCtx) -> int {
 
 pub open spec fn dsp_step(cpu: int, st: DspSt, op: Op) -> Option<DspSt> {
     match st {
+        // an own-queue hit ends the dispatch; the word is not touched, the
+        // promise it may carry is fulfilled when the task runs
         DspSt::Start => match op {
             Op::MoveToLocal { dsq, moved } => if dsq as int == cpu {
-                if !moved { Some(DspSt::Own) }
-                // a CPU past the policy's cap has no mark to clear
-                else if cpu < max_cpus() { Some(DspSt::Served) }
-                else { Some(DspSt::Done) }
+                if moved { Some(DspSt::Done) } else { Some(DspSt::Own) }
             } else { None },
             _ => None,
         },
-        // an own-queue hit clears the claim mark and ends the dispatch
-        DspSt::Served => match op {
-            Op::Unclaim { slot } => if slot as int == cpu { Some(DspSt::Done) } else { None },
+        // the guard; a CPU past the policy's cap has no word and stops here
+        DspSt::Own => match op {
+            Op::Scan { slot, ok } => if slot as int == cpu && cpu < max_cpus() {
+                if ok { Some(DspSt::Guarded) } else { Some(DspSt::Done) }
+            } else { None },
             _ => None,
         },
-        DspSt::Own => match op {
+        DspSt::Guarded => match op {
             Op::NrCpuIds { nr } => Some(DspSt::Scan(StealCtx { cpu, cap: cap_of(nr), next: 0 })),
             _ => None,
         },
         DspSt::Scan(x) => {
             let c = skip_own(x);
             if c >= x.cap {
-                None
+                // nothing found: the own word goes free again
+                match op {
+                    Op::SetFree { slot } => if slot as int == cpu { Some(DspSt::Done) } else { None },
+                    _ => None,
+                }
             } else {
                 match op {
-                    // the busy flag first, of the next CPU in order
-                    Op::BusyGet { slot, busy } => if slot as int == c {
+                    // the word first, of the next CPU in order
+                    Op::IsBusy { slot, busy } => if slot as int == c {
                         if busy { Some(DspSt::Busy(StealCtx { cpu: x.cpu, cap: x.cap, next: c })) }
                         else { Some(DspSt::Scan(after(x, c))) }
                     } else { None },
@@ -298,8 +338,9 @@ pub open spec fn dsp_step(cpu: int, st: DspSt, op: Op) -> Option<DspSt> {
             } else { None },
             _ => None,
         },
+        // the task taken may have been the victim's promise
         DspSt::Stole(x) => match op {
-            Op::Unclaim { slot } => if slot as int == x.next { Some(DspSt::Done) } else { None },
+            Op::Unpromise { slot } => if slot as int == x.next { Some(DspSt::Done) } else { None },
             _ => None,
         },
         DspSt::Done => None,
@@ -329,18 +370,19 @@ pub broadcast proof fn lemma_dsp_run_push(cpu: int, ops: Seq<Op>, op: Op)
     assert(ops.push(op).drop_last() =~= ops);
 }
 
-/// A scan that ran out of CPUs is done: the steal was exhaustive.
-pub open spec fn dsp_accepts(st: DspSt) -> bool {
+/// Done, or stopped at the guard on a CPU past the policy's cap, which
+/// has no word to guard with.
+pub open spec fn dsp_accepts(cpu: int, st: DspSt) -> bool {
     match st {
         DspSt::Done => true,
-        DspSt::Scan(x) => skip_own(x) >= x.cap,
+        DspSt::Own => cpu >= max_cpus(),
         _ => false,
     }
 }
 
 pub open spec fn dispatch_ok(cpu: int, before: Seq<Op>, after: Seq<Op>) -> bool {
     extends(before, after) && match dsp_run(cpu, tail_of(before, after)) {
-        Some(st) => dsp_accepts(st),
+        Some(st) => dsp_accepts(cpu, st),
         None => false,
     }
 }
@@ -392,7 +434,8 @@ pub open spec fn dequeue_ok(before: Seq<Op>, after: Seq<Op>) -> bool {
     extends(before, after) && tail_of(before, after) == seq![Op::CountDec]
 }
 
-/// `running` and `stopping`: the busy flag of the task's CPU follows.
+/// `running` and `stopping`: the word of the task's CPU is written busy,
+/// or free.
 pub open spec fn busy_ok(busy: bool, before: Seq<Op>, after: Seq<Op>) -> bool {
     extends(before, after) && {
         let t = tail_of(before, after);
@@ -400,7 +443,8 @@ pub open spec fn busy_ok(busy: bool, before: Seq<Op>, after: Seq<Op>) -> bool {
         &&& t[0] is TaskCpu
         &&& (if (t[0]->TaskCpu_cpu as int) < max_cpus() {
                 t.len() == 2
-                && t[1] == (Op::BusySet { slot: t[0]->TaskCpu_cpu as usize, busy: busy })
+                && t[1] == (if busy { Op::SetBusy { slot: t[0]->TaskCpu_cpu as usize } }
+                            else { Op::SetFree { slot: t[0]->TaskCpu_cpu as usize } })
             } else {
                 t.len() == 1
             })

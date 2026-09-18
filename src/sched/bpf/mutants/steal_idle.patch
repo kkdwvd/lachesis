@@ -6,15 +6,15 @@
 # flight is stolen away; a second task placed behind it lands on a CPU whose
 # kick was already spent, and waits. Ipanema's `can_steal_core` takes only
 # from an overloaded core, and the dispatch automaton reads a queue count
-# only after a busy read of the same CPU came back true.
+# only after the same CPU's word read busy.
 #
 --- bpf/main.rs
 +++ bpf/main.rs
-@@ -270,7 +270,6 @@
+@@ -334,7 +334,6 @@
              decreases n - c,
          {
-             if c != cpu as u32
--                && self.busy.get(c as usize, log)
+             if c != me
+-                && self.words.is_busy(c as usize, log)
                  && scx::dsq_nr_queued(c as u64, log) > 0
                  && scx::dsq_move_to_local(c as u64, log)
              {

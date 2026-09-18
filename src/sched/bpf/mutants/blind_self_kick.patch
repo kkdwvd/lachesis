@@ -11,7 +11,7 @@
 #
 --- bpf/main.rs
 +++ bpf/main.rs
-@@ -329,7 +329,6 @@
+@@ -394,7 +394,6 @@
      fn update_idle(&self, cpu: i32, idle: bool, log: &mut Log) {
          if idle
              && self.nr_queued.load(log) > 0

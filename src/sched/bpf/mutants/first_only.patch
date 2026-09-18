@@ -8,31 +8,29 @@
 # what the theorem's "no CPU overloaded" conclusion rests on. A count is
 # stale by the time the move is attempted, so a scan that stops at the first
 # candidate can end idle beside an overloaded CPU it never read. The
-# dispatch contract accepts an idle exit only with the scan at the last CPU;
-# the loop invariant fails at the break, and no invariant would make the
-# postcondition hold there.
+# dispatch contract accepts an idle exit only with the scan past the last
+# CPU and the own word written free; the loop invariant fails at the break,
+# and no invariant would make the postcondition hold there.
 #
 --- bpf/main.rs
 +++ bpf/main.rs
-@@ -269,16 +269,16 @@
+@@ -333,14 +333,16 @@
                                   refine::dsp_run(cpu as int, refine::tail_of(pre, log.ops@))),
              decreases n - c,
          {
--            if c != cpu as u32
--                && self.busy.get(c as usize, log)
+-            if c != me
+-                && self.words.is_busy(c as usize, log)
 -                && scx::dsq_nr_queued(c as u64, log) > 0
 -                && scx::dsq_move_to_local(c as u64, log)
 -            {
--                // If that was a task an enqueue had filed there for a
--                // claim, the claim is served; the mark must not outlive it.
--                self.claimed.clear(c as usize, log);
+-                self.words.unpromise(c as usize, log);
 -                self.stats.inc(STEAL);
 -                return;
-+            if c != cpu as u32 && self.busy.get(c as usize, log) {
++            if c != me && self.words.is_busy(c as usize, log) {
 +                if scx::dsq_nr_queued(c as u64, log) > 0
 +                    && scx::dsq_move_to_local(c as u64, log)
 +                {
-+                    self.claimed.clear(c as usize, log);
++                    self.words.unpromise(c as usize, log);
 +                    self.stats.inc(STEAL);
 +                    return;
 +                }

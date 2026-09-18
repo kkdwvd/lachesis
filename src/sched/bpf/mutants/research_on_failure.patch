@@ -1,0 +1,45 @@
+# research_on_failure: a policy the contracts must reject.
+#
+# Ask the kernel to search again when its pick did not take, instead of
+# scanning the CPUs once each: this scheduler's earlier design, a loop of
+# `scx_bpf_select_cpu_dfl` calls bounded by the CPU count.
+#
+# The finer-grained model's finding: the kernel may hand back a CPU this
+# enqueue already claimed, if it went idle again meanwhile -- woken by the
+# landing of a task assigned to it, it finds nothing and idles again -- so
+# an adversarial interleaving exhausts any bound on the retries without
+# the search ever probing an idle CPU whose bit stays up, and the task ends
+# on its busy home CPU beside that idle one. The policy's own scan tests
+# each bit once, so it reaches every CPU; the automaton's `Scan` state has
+# no rule for a `SelectDfl`.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -249,15 +249,18 @@
+                 refine::insert_finishes(refine::enq_run(refine::tail_of(pre, log.ops@)), q as u64),
+             decreases n - j,
+         {
+-            if scx::test_and_clear_cpu_idle(j as i32, log) {
+-                scx::kick_cpu(j as i32, SCX_KICK_IDLE, log);
+-                if scx::dsq_nr_queued(j as u64, log) <= 0
+-                    && self.words.promise(j as usize, log)
+-                {
+-                    q = j;
+-                    placed_idle = true;
+-                    break;
+-                }
++            let (t2, idle2) = scx::select_cpu_dfl(&p, cpu, 0, log);
++            if !idle2 {
++                break;
++            }
++            scx::kick_cpu(t2, SCX_KICK_IDLE, log);
++            if (t2 as u32) < n
++                && scx::dsq_nr_queued(t2 as u64, log) <= 0
++                && self.words.promise(t2 as usize, log)
++            {
++                q = t2 as u32;
++                placed_idle = true;
++                break;
+             }
+             j = j + 1;
+         }

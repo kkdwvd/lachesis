@@ -23,7 +23,7 @@
 //! * [`task`] -- the `#[btf]` CO-RE views, [`task::Task`] and its specs.
 //! * [`atomic`] -- an opaque [`atomic::AtomicU64`], no `Ordering` exposed.
 //! * [`stats`] -- [`stats::Stats`], a `.bss` counter array.
-//! * [`flags`] -- [`flags::Busy`] and [`flags::Claims`], per-CPU booleans.
+//! * [`flags`] -- [`flags::Words`], the policy's per-CPU word: free, promised, busy.
 //! * [`log`] -- the receipt [`log::Log`], the currency of refinement.
 //! * [`panic`] -- the `#[panic_handler]`, defined once for all policies.
 //! * [`ops`] -- the `scheduler!` macro: struct_ops table and trampolines.
@@ -67,7 +67,7 @@ pub mod prelude {
     pub use crate::vprelude::*;
 
     pub use crate::atomic::{AtomicU64, Counter};
-    pub use crate::flags::{Busy, Claims};
+    pub use crate::flags::Words;
     pub use crate::log::{Log, Op};
     pub use crate::scx::{
         self, SCX_DSQ_FLAG_BUILTIN, SCX_DSQ_GLOBAL, SCX_DSQ_LOCAL, SCX_KICK_IDLE,

@@ -1,0 +1,21 @@
+# keep_promise: a policy the contracts must reject.
+#
+# A thief leaves the victim's word at promised after taking the task that
+# was promised to it.
+#
+# The victim then waits for a landing that has already happened: its guard
+# finds its own word not free, so it never steals, and every placement that
+# finds it idle fails the compare-and-swap and looks on. The CPU only gets
+# work again from a task whose search finds nothing at all. The dispatch
+# automaton ends a move with the victim's `Unpromise`.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -338,7 +338,6 @@
+                 && scx::dsq_nr_queued(c as u64, log) > 0
+                 && scx::dsq_move_to_local(c as u64, log)
+             {
+-                self.words.unpromise(c as usize, log);
+                 self.stats.inc(STEAL);
+                 return;
+             }
