@@ -39,9 +39,12 @@ with TLC and shows that four weakened variants of the policy violate it.
 The compiled callbacks are checked against that model: every trusted
 wrapper leaves a ghost receipt, the `Policy` trait's contracts say which
 sequences of receipts the model's actions allow, and Verus proves the
-policy produces one. Ten variants of the policy that reproduce known
-scheduler bugs, among them the two the Ipanema paper found in CFS, are
-rejected by those contracts on every build. Starvation freedom and bounded
+policy produces one. The model takes one shared access per step, the
+code's granularity; refining it to that found three races in the design,
+each closed and each kept as a rejected variant. Thirteen variants of the
+policy that reproduce known scheduler bugs, among them the two the
+Ipanema paper found in CFS, are rejected by those contracts on every
+build. Starvation freedom and bounded
 fairness remain goals, and the link between the contracts and the model's
 actions is by construction rather than a theorem. Kernel bindings and
 their assumed contracts live in an explicit trusted base; the loader and

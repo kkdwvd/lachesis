@@ -43,8 +43,9 @@ them and imports none of them. The loader is verified by nothing.
   views, the `Task` handle and its accessor specifications), `atomic.rs`
   (an opaque `AtomicU64` with no `Ordering` in its interface), `stats.rs`
   (`Stats<N>`, the `.bss` counters), `panic.rs` (the one
-  `#[panic_handler]`), `flags.rs` (`Busy<N>` and `Claims<N>`, per-CPU
-  booleans other CPUs read without a lock), `log.rs` (the receipt log:
+  `#[panic_handler]`), `flags.rs` (`Words<N>`, the policy's per-CPU
+  word -- free, promised, busy or scanning -- read and compare-and-swapped
+  without a lock), `log.rs` (the receipt log:
   the ghost `Op` every wrapper appends, which the refinement contracts
   are stated over) and `ops.rs` (the `scheduler!` macro and its
   trampolines). `atomic.rs` also holds `Counter`, the published count,
@@ -57,9 +58,10 @@ them and imports none of them. The loader is verified by nothing.
   belongs to no one scheduler.
 - `src/model` — `lachesis_model`, the concurrent work-conservation model
   (roadmap section 5.4): the sched_ext event model at one transition per
-  shared-variable access, the per-CPU-queue policy's actions under the
-  same names, Ipanema's definitions restated for it, the inductive
-  invariant and the theorem. `refine.rs` beside it is the refinement
+  shared-variable access -- the code's granularity, every kfunc call and
+  every word access its own step -- the per-CPU-queue policy's actions
+  under the same names, Ipanema's definitions restated for it, the
+  inductive invariant and the theorem. `refine.rs` beside it is the refinement
   contracts: for each callback the model has an action for, an automaton
   over the receipts the callback may leave, which the `Policy` trait's
   `ensures` names and the policy proves it drives to the end. Ghost only,
@@ -70,8 +72,8 @@ them and imports none of them. The loader is verified by nothing.
   policy violate it, and that a fifth, the steal that gives up after its
   first candidate, is tolerated.
 - `src/sched` — one scheduler, and everything about it that is verified:
-  `bpf/main.rs` the policy, `bpf/mutants/` ten variants of it that the
-  contracts must reject, `control/` the crate `lachesis_control`, the
+  `bpf/main.rs` the policy, `bpf/mutants/` thirteen variants of it that
+  the contracts must reject, `control/` the crate `lachesis_control`, the
   Makefile stub, and the `vm-run.sh`/`vm-guest.sh` pair that runs the
   whole thing in a VM.
 - `src/loader` — `lachesis`, the userspace binary. Unverified by design,
@@ -146,26 +148,34 @@ brings in everything, including the `verus!` macro.
 
 What that policy does, in the mechanisms the work-conservation theorem
 is about. One user DSQ per CPU, ids equal to the CPU numbers, created in
-`init`, which refuses a machine with more than `MAX_CPUS`. `select_cpu`
-returns the previous CPU and nothing else: the placement is `enqueue`'s,
-and a task is never direct-dispatched to a local DSQ, because a task there
-cannot be stolen. `enqueue` publishes first, bumping `nr_queued`, then
-runs the kernel's idle search as often as it finds idle CPUs: each hit is
-claimed and kicked; the first whose queue is empty and whose `claimed`
-mark is down takes the task and gets the mark; one with work already
-queued, or a mark up, is left to that; a search that finds nothing files
-the task on the CPU it woke on. `dequeue`, which the kernel calls exactly
-once when custody ends, takes the count back down. `dispatch` drains its
-own queue and otherwise scans every other CPU, stealing from the first
-that is running a task and has another queued, going on to the next when
-the move fails; whoever consumes from a queue clears its claim mark.
-`running` and `stopping` keep the per-CPU `busy` flag the steal consults.
+`init`, which refuses a machine with more than `MAX_CPUS`. One word per
+CPU, `words`: free, promised, busy or scanning. `select_cpu` returns the
+previous CPU and nothing else: the placement is `enqueue`'s, and a task
+is never direct-dispatched to a local DSQ, because a task there cannot be
+stolen. `enqueue` publishes first, bumping `nr_queued`, then runs the
+kernel's idle search once; the CPU it claims is kicked, its queue read,
+and its word compare-and-swapped from free to promised, and if all three
+take the task is filed there. If the kernel saw nothing idle, the task
+goes to the CPU it woke on. If the claim did not take -- another task on
+its way there, or the CPU ran something since its bit was claimed -- the
+policy scans every CPU itself, testing and clearing each bit once in
+order and putting each hit through the same three steps, and past the
+last CPU files the task on the CPU it woke on. `dequeue`, which the
+kernel calls exactly once when custody ends, takes the count back down.
+`dispatch` drains its own queue; otherwise it takes its own word from
+free to scanning and, if that does not take, goes idle to wait for the
+task promised to it; otherwise it scans every other CPU, stealing from
+the first whose word says busy and whose queue is non-empty, going on to
+the next when the move fails, taking the victim's word from promised to
+free on a move, and writing its own word free again if it finds nothing.
+`running` writes the word busy and `stopping` writes it free.
 `update_idle`, which the kernel calls after setting the CPU's idle bit,
 reads the count and, if it is non-zero, claims its own bit with a
 test-and-clear and kicks self. The publish and the self-claim are the two
 sides of the idle interlock: either the enqueue sees the bit or the idle
 CPU sees the count. Each of these rules closed a trace the model found,
-and `src/model/lib.rs` says which.
+and `src/model/lib.rs` says which; the word, the scan and the guard came
+from refining the model to one shared access per step.
 
 The state is a struct and the callbacks are an `impl Policy`, both inside
 `verus!`, so Verus checks them:
@@ -180,8 +190,8 @@ const OWN: usize = 2;
 pub struct Lachesis {
     vtime_now: AtomicU64,
     nr_queued: Counter,
-    stats: Stats<7>,
-    claimed: Claims<64>,
+    stats: Stats<9>,
+    words: Words<64>,
 }
 
 impl Policy for Lachesis {
@@ -202,11 +212,14 @@ erased pass the log is a zero-sized struct. The `Policy` trait's
 in `src/model/refine.rs` as an automaton the ops must drive to its end:
 `dequeue`'s says exactly one `CountDec` was appended, which
 `Counter::dec` does; `enqueue`'s says the task's CPU and the CPU count
-were read, the count published, the idle search run with every claimed
-CPU kicked, and one insert made on the right queue; `dispatch`'s says the
-own queue was tried first and the scan read every other CPU's busy flag
-in order, its queue only when busy, and moved only from a queue that read
-non-empty. A callback that does something the contract does not allow, in
+were read, the count published, the kernel's search run once, every
+claimed CPU kicked, its queue read and its word compare-and-swapped, the
+policy's own scan run when the claim did not take, and one insert made
+on the right queue; `dispatch`'s says the own queue was tried first, the
+own word guarded, the scan read every other CPU's word in order, its
+queue only when busy, and moved only from a queue that read non-empty,
+the victim unpromised on a move and the own word freed when nothing was
+found. A callback that does something the contract does not allow, in
 an order it does not allow, or stops early, fails to verify. This is how
 the policy is checked against the model without being written into it:
 the model was proved over these action shapes, and the contracts are
@@ -451,10 +464,14 @@ So the BPF side copies the two fields that matter into its own static:
   watchdog in `vm-run.sh`, and exits 124. Do not reintroduce a `timeout`
   around `vng`: the script's header explains why it cannot end a run and
   why it breaks the watchdog that can.
-- `make tlc` runs TLC over `src/tla/`: the positive configurations must
-  pass and every negative variant must report a violation. It fetches
-  TLA+ tools 1.7.4 into `build/tla/` on first use, the last release that
-  runs on this host's Java 8, and keeps TLC's state files there too.
+- `make tlc` runs TLC over `src/tla/`: the two-CPU positive
+  configurations must pass and every negative variant must report a
+  violation. `make -C src/tla long` adds the three-CPU ones: the two
+  directed configurations that found the races the design was changed
+  for, kept as regressions, the first-only steal, and the unconstrained
+  three-CPU run, hours on this host. It fetches TLA+ tools 1.7.4 into
+  `build/tla/` on first use, the last release that runs on this host's
+  Java 8, and keeps TLC's state files there too.
 - `src/sched/Makefile` picks `LLVM_PREFIX` itself: Ubuntu's
   `/usr/lib/llvm-22` when it exists, `/usr` otherwise, which is where the
   system LLVM 22 lives on the development host. Override it for anything
@@ -501,11 +518,13 @@ So the BPF side copies the two fields that matter into its own static:
 - `make verify` then applies every patch in `src/sched/bpf/mutants/` to a
   copy of the policy and runs the same pass on it, and fails unless Verus
   rejects each with a verification error, reported one per line as
-  `mutant <name>`. The ten there reproduce known bugs -- the two the
+  `mutant <name>`. The thirteen there reproduce known bugs -- the two the
   Ipanema paper found in CFS, the traces TLC found while this design was
-  being built, an off-by-one -- and each patch's header says which step
-  of which contract it breaks. `make -C src/sched verify-mutants` runs
-  only those; a new mutant is a new patch, nothing else.
+  being built, the three races the model found once it was refined to one
+  shared access per step, an off-by-one -- and each patch's header says
+  which step of which contract it breaks. `make -C src/sched
+  verify-mutants` runs only those; a new mutant is a new patch, nothing
+  else.
 - A fifth pass, `lachesis_control`, runs beside them and is reported on
   its own line. It is a leaf: it imports none of the other crates, so it
   names no rlibs and no search paths, and it runs with `--no-cheating`
