@@ -30,12 +30,12 @@
 //! from the same model: without it, a CPU could read a victim's word busy,
 //! be promised a task itself, and steal, ending up with the stolen task
 //! running and the promised one queued behind it. One atomic per slot,
-//! like [`crate::stats::Stats`]; every access is `Relaxed` for the reason
-//! `atomic.rs` gives, except that the compare-and-swaps are full
-//! read-modify-writes, which the sequential-consistency assumption of
-//! roadmap section 3.7 covers.
+//! like [`crate::stats::Stats`]; loads and stores are `Relaxed` and the
+//! compare-and-swaps `SeqCst`, for the reasons `atomic.rs` gives, and the
+//! sequential-consistency assumption of roadmap section 3.7 covers the
+//! reads a proof leans on.
 
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU64, Ordering::{Relaxed, SeqCst}};
 
 use crate::log::{Log, Op};
 use crate::vprelude::*;
@@ -63,8 +63,8 @@ impl<const N: usize> Words<N> {
         ensures
             final(log).ops@ == old(log).ops@.push(Op::Promise { slot: i, ok: r }),
     {
-        match self.words.get(i) {
-            Some(w) => w.compare_exchange(FREE, PROMISED, Relaxed, Relaxed).is_ok(),
+        let r = match self.words.get(i) {
+            Some(w) => w.compare_exchange(FREE, PROMISED, SeqCst, SeqCst).is_ok(),
             None => false,
         }
     }
@@ -92,8 +92,8 @@ impl<const N: usize> Words<N> {
         ensures
             final(log).ops@ == old(log).ops@.push(Op::Scan { slot: i, ok: r }),
     {
-        match self.words.get(i) {
-            Some(w) => w.compare_exchange(FREE, SCANNING, Relaxed, Relaxed).is_ok(),
+        let r = match self.words.get(i) {
+            Some(w) => w.compare_exchange(FREE, SCANNING, SeqCst, SeqCst).is_ok(),
             None => false,
         }
     }
@@ -108,7 +108,7 @@ impl<const N: usize> Words<N> {
             final(log).ops@ == old(log).ops@.push(Op::Unpromise { slot: i }),
     {
         if let Some(w) = self.words.get(i) {
-            let _ = w.compare_exchange(PROMISED, FREE, Relaxed, Relaxed);
+            let _ = w.compare_exchange(PROMISED, FREE, SeqCst, SeqCst);
         }
     }
 

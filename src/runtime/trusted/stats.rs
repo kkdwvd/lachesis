@@ -18,7 +18,7 @@
 //! self.stats.inc(LOCAL);
 //! ```
 
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 use crate::vprelude::*;
 
@@ -42,7 +42,7 @@ impl<const N: usize> Stats<N> {
             i < N,
     {
         if let Some(c) = self.counters.get(i) {
-            c.fetch_add(1, Relaxed);
+            c.fetch_add(1, SeqCst);
         }
     }
 }

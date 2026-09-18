@@ -7,15 +7,21 @@
 //! never sees `core::sync::atomic`, which has no specification it could
 //! use.
 //!
-//! Every access is `Relaxed`. BPF has no fence instruction, so a stronger
-//! ordering is not expressible in the target; roadmap section 3.7 item 4
-//! records the sequential-consistency assumption that proofs about these
-//! will rest on, and the lint that will force it. The specs below are
-//! empty -- a `load` says nothing about what was stored -- because a
-//! useful one needs a ghost token per location, which arrives with the
-//! phase 3 tokenized state machine.
+//! Every load and store is `Relaxed`: BPF has no fence instruction, so a
+//! stronger ordering on those is not expressible in the target. Every
+//! read-modify-write is `SeqCst`, and that is not a choice about
+//! ordering: the BPF backend of the LLVM this pipeline uses lowers a
+//! `Relaxed` `fetch_add` whose result is used to the non-fetching atomic
+//! add and hands back the addend, silently, where any stronger ordering
+//! gets the fetching form -- the instruction the kernel executes is the
+//! same either way, a full barrier. Roadmap section 3.7 item 4 records
+//! the sequential-consistency assumption that proofs about these rest on,
+//! and the lint that will force it; this is one more reason for that
+//! lint. The specs below are empty -- a `load` says nothing about what
+//! was stored -- because a useful one needs a ghost token per location,
+//! which arrives with the phase 3 tokenized state machine.
 
-use core::sync::atomic::{AtomicU64 as CoreAtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU64 as CoreAtomicU64, Ordering::{Relaxed, SeqCst}};
 
 use crate::log::{Log, Op};
 use crate::vprelude::*;
@@ -40,7 +46,7 @@ impl AtomicU64 {
 
     #[verifier::external_body]
     pub fn fetch_add(&self, v: u64) {
-        self.inner.fetch_add(v, Relaxed);
+        self.inner.fetch_add(v, SeqCst);
     }
 
     /// Wrapping decrement. A counter that is incremented on one path and
@@ -48,7 +54,7 @@ impl AtomicU64 {
     /// pairing is the caller's invariant, not this wrapper's.
     #[verifier::external_body]
     pub fn fetch_sub(&self, v: u64) {
-        self.inner.fetch_sub(v, Relaxed);
+        self.inner.fetch_sub(v, SeqCst);
     }
 }
 
