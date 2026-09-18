@@ -11,9 +11,10 @@ SRC := bpf/main.rs
 # the license, and the policy instance, whose counters and exit info the
 # loader reads back out of `.bss`.
 KEEP_SYMS := lachesis_ops \
-             lachesis_select_cpu lachesis_enqueue lachesis_dispatch \
-             lachesis_running lachesis_stopping lachesis_enable \
-             lachesis_init lachesis_exit \
+             lachesis_select_cpu lachesis_enqueue lachesis_dequeue \
+             lachesis_dispatch lachesis_running lachesis_stopping \
+             lachesis_enable lachesis_update_idle lachesis_init \
+             lachesis_exit \
              LACHESIS \
              _LICENSE
 

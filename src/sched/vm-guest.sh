@@ -79,13 +79,17 @@ rm -rf "$VERIFY_PIN"
 	sleep 1
   done ) > "$OUTDIR/sched_ext.log" 2>&1 &
 
-# Something to schedule: busy loops on every CPU, plus a few sleepers to
-# exercise enqueue and dispatch rather than just the running path.
-for _ in $(seq "$(nproc)"); do
+# Something to schedule. One spinner fewer than there are CPUs, so at least
+# one CPU keeps going idle, plus bursty tasks that wake while the spinners
+# hold the others: those land in a busy CPU's queue, and they are what the
+# idle CPU steals and what the enqueue-side kick exists for.
+ncpu=$(nproc)
+for _ in $(seq $(( ncpu > 1 ? ncpu - 1 : 1 ))); do
 	timeout "$SECS" sh -c 'while :; do :; done' &
 done
-for _ in 1 2 3 4; do
-	timeout "$SECS" sh -c 'while :; do sleep 0.01; done' &
+for _ in $(seq $(( 2 * ncpu ))); do
+	timeout "$SECS" sh -c \
+		'while :; do i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done; sleep 0.003; done' &
 done
 
 hdr "run: lachesis --duration $SECS --interval 1"

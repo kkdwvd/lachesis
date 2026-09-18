@@ -60,6 +60,10 @@ const OPS_MAP: &str = "lachesis_ops";
 /// static is treated as a counter, so adding one to the policy needs no
 /// change here.
 const VTIME_FIELD: &str = "vtime_now";
+const NR_QUEUED_FIELD: &str = "nr_queued";
+/// Per-CPU state the policy publishes for its own use; not counters, and
+/// too wide to print. Matched on the field name one level up from the leaf.
+const PER_CPU_FIELDS: [&str; 2] = ["busy", "claimed"];
 const EXIT_KIND_FIELD: &str = "exit_kind";
 const EXIT_CODE_FIELD: &str = "exit_code";
 
@@ -67,6 +71,13 @@ const EXIT_CODE_FIELD: &str = "exit_code";
 /// is what the three names above are matched against: the decoded names are
 /// rooted at the `.bss` variable, so the policy's `vtime_now` shows up as
 /// `LACHESIS.vtime_now`.
+/// A leaf inside one of the policy's per-CPU arrays, `LACHESIS.busy[3]`.
+fn is_busy_leaf(name: &str) -> bool {
+    name.split('.').any(|seg| {
+        PER_CPU_FIELDS.iter().any(|f| seg.strip_prefix(f).is_some_and(|r| r.starts_with('[')))
+    })
+}
+
 fn tail(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
@@ -329,6 +340,7 @@ const MAX_COUNTERS: usize = 16;
 
 struct Sample {
     vtime: u64,
+    nr_queued: u64,
     exit_kind: u64,
     exit_code: u64,
     counters: [u64; MAX_COUNTERS],
@@ -340,7 +352,10 @@ fn counter_names(leaves: &[Leaf]) -> Vec<&str> {
     leaves
         .iter()
         .filter(|l| {
-            !matches!(tail(&l.name), VTIME_FIELD | EXIT_KIND_FIELD | EXIT_CODE_FIELD)
+            !matches!(
+                tail(&l.name),
+                VTIME_FIELD | NR_QUEUED_FIELD | EXIT_KIND_FIELD | EXIT_CODE_FIELD
+            ) && !is_busy_leaf(&l.name)
         })
         .map(|l| l.name.as_str())
         .collect()
@@ -349,15 +364,20 @@ fn counter_names(leaves: &[Leaf]) -> Vec<&str> {
 fn sample(leaves: &[Leaf], value: &[u8]) -> Sample {
     let mut s = Sample {
         vtime: 0,
+        nr_queued: 0,
         exit_kind: 0,
         exit_code: 0,
         counters: [0; MAX_COUNTERS],
     };
     let mut n = 0;
     for leaf in leaves {
+        if is_busy_leaf(&leaf.name) {
+            continue;
+        }
         let v = leaf.read(value);
         match tail(&leaf.name) {
             VTIME_FIELD => s.vtime = v,
+            NR_QUEUED_FIELD => s.nr_queued = v,
             EXIT_KIND_FIELD => s.exit_kind = v,
             EXIT_CODE_FIELD => s.exit_code = v,
             _ => {
@@ -520,10 +540,15 @@ fn run() -> Result<i32, String> {
                 format!("{name}=+{d}")
             })
             .collect();
+        // `nr_queued` is a gauge, not a counter: the policy's count of
+        // queued and in-flight tasks at the instant of the sample. It
+        // should hover near zero on an unloaded machine; a monotonic climb
+        // would mean an enqueue without its matching dequeue.
         println!(
-            "[{:6.1}s] vtime={} {}",
+            "[{:6.1}s] vtime={} queued={} {}",
             start.elapsed().as_secs_f64(),
             now.vtime,
+            now.nr_queued,
             counters.join(" ")
         );
         if now.exit_kind != 0 {
