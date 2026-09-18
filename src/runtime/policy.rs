@@ -43,6 +43,18 @@ pub trait Policy {
     fn enqueue(&self, p: Task, enq_flags: u64) {
     }
 
+    /// `ops.dequeue`: `p` is leaving the scheduler's custody, which it
+    /// entered when `enqueue` put it on a user DSQ. Called exactly once per
+    /// custody period, whatever ends it: a dispatch moving the task to a
+    /// local DSQ, on this CPU or on the CPU that stole it, or the kernel
+    /// removing a queued task because it exited or changed a scheduling
+    /// property. Never called for a task `select_cpu` or `enqueue` sent
+    /// straight to a terminal DSQ. That one-to-one pairing with the
+    /// custody-taking insert is what lets a policy keep an exact count of
+    /// its queued and in-flight work.
+    fn dequeue(&self, p: Task, deq_flags: u64) {
+    }
+
     /// `ops.dispatch`: the local DSQ of `cpu` ran dry; move work onto it.
     /// `prev` is the task still running there, if any.
     fn dispatch(&self, cpu: i32, prev: Option<Task>)
@@ -62,6 +74,20 @@ pub trait Policy {
 
     /// `ops.enable`: `p` is joining this scheduler.
     fn enable(&self, p: Task) {
+    }
+
+    /// `ops.update_idle`: `cpu` is entering idle (`idle` true) or leaving
+    /// it. Called with the CPU's runqueue locked, after the kernel has
+    /// updated the built-in idle mask -- that ordering is deliberate on the
+    /// kernel's side, so that a policy can interlock this callback with
+    /// `enqueue`: either the enqueue sees the idle bit, or this callback
+    /// sees the task the enqueue queued. Implementing it disables the
+    /// built-in idle tracking unless the ops table carries
+    /// `SCX_OPS_KEEP_BUILTIN_IDLE`, which `scheduler!`'s `flags:` sets.
+    fn update_idle(&self, cpu: i32, idle: bool)
+        requires
+            cpu >= 0,
+    {
     }
 
     /// `ops.init`: called once, in sleepable context, before any task is

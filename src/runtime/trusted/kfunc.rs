@@ -38,7 +38,17 @@ unsafe extern "C" {
         enq_flags: u64,
     );
 
-    pub(crate) fn scx_bpf_dsq_move_to_local(dsq_id: u64);
+    pub(crate) fn scx_bpf_dsq_move_to_local(dsq_id: u64) -> bool;
+
+    pub(crate) fn scx_bpf_dsq_nr_queued(dsq_id: u64) -> i32;
+
+    pub(crate) fn scx_bpf_kick_cpu(cpu: i32, flags: u64);
+
+    pub(crate) fn scx_bpf_task_cpu(p: *const task_struct) -> i32;
+
+    pub(crate) fn scx_bpf_nr_cpu_ids() -> u32;
+
+    pub(crate) fn scx_bpf_test_and_clear_cpu_idle(cpu: i32) -> bool;
 
     pub(crate) fn scx_bpf_create_dsq(dsq_id: u64, node: i32) -> i32;
 

@@ -23,6 +23,7 @@
 //! * [`task`] -- the `#[btf]` CO-RE views, [`task::Task`] and its specs.
 //! * [`atomic`] -- an opaque [`atomic::AtomicU64`], no `Ordering` exposed.
 //! * [`stats`] -- [`stats::Stats`], a `.bss` counter array.
+//! * [`flags`] -- [`flags::Flags`], a `.bss` array of per-index booleans.
 //! * [`panic`] -- the `#[panic_handler]`, defined once for all policies.
 //! * [`ops`] -- the `scheduler!` macro: struct_ops table and trampolines.
 //!
@@ -33,6 +34,7 @@
 #![no_std]
 
 pub mod atomic;
+pub mod flags;
 pub mod kfunc;
 pub mod ops;
 pub mod panic;
@@ -63,8 +65,10 @@ pub mod prelude {
     pub use crate::vprelude::*;
 
     pub use crate::atomic::AtomicU64;
+    pub use crate::flags::Flags;
     pub use crate::scx::{
-        self, SCX_DSQ_FLAG_BUILTIN, SCX_DSQ_GLOBAL, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+        self, SCX_DSQ_FLAG_BUILTIN, SCX_DSQ_GLOBAL, SCX_DSQ_LOCAL, SCX_KICK_IDLE,
+        SCX_OPS_KEEP_BUILTIN_IDLE, SCX_SLICE_DFL,
     };
     pub use crate::scheduler;
     pub use crate::stats::Stats;

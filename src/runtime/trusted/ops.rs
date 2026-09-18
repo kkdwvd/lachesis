@@ -112,6 +112,9 @@ pub const fn pad_name(s: &str) -> [u8; 128] {
 /// the policy, its type, and a `const` initializer -- `#[no_mangle]` so
 /// that `bpftool map dump` finds the counters inside it. The static is
 /// emitted outside `verus!` and passed to every callback as `&self`.
+/// `flags:` is optional and is written into the ops table's `flags`
+/// member (`SCX_OPS_*`); a policy that implements `update_idle` and still
+/// wants the kernel's idle tracking passes `SCX_OPS_KEEP_BUILTIN_IDLE`.
 ///
 /// Each `ops` line reads "struct_ops member `as` exported program symbol".
 /// The signature is not repeated: the `Policy` trait fixes it, and
@@ -129,6 +132,7 @@ macro_rules! scheduler {
     (
         map: $map:ident,
         name: $name:literal,
+        $(flags: $flags:expr,)?
         policy: $inst:ident : $ty:ty = $init:expr,
         ops { $($m:ident as $sym:ident),* $(,)? }
         $(sleepable { $($sm:ident as $ssym:ident),* $(,)? })?
@@ -146,6 +150,7 @@ macro_rules! scheduler {
         struct sched_ext_ops {
             $($m: $crate::ops::OpFn,)*
             $($($sm: $crate::ops::OpFn,)*)?
+            flags: u64,
             name: [u8; 128],
         }
 
@@ -157,6 +162,7 @@ macro_rules! scheduler {
         static $map: sched_ext_ops = sched_ext_ops {
             $($m: $sym,)*
             $($($sm: $ssym,)*)?
+            flags: 0 $(| $flags)?,
             name: $crate::ops::pad_name($name),
         };
 
@@ -180,6 +186,10 @@ macro_rules! __trampoline {
         $crate::__entry!($sec, $inst, enqueue, $sym,
             (p: $crate::task::Task, enq_flags: u64));
     };
+    ($sec:literal, $inst:ident, dequeue, $sym:ident) => {
+        $crate::__entry!($sec, $inst, dequeue, $sym,
+            (p: $crate::task::Task, deq_flags: u64));
+    };
     ($sec:literal, $inst:ident, dispatch, $sym:ident) => {
         $crate::__entry!($sec, $inst, dispatch, $sym,
             (cpu: i32, prev: ::core::option::Option<$crate::task::Task>));
@@ -193,6 +203,9 @@ macro_rules! __trampoline {
     };
     ($sec:literal, $inst:ident, enable, $sym:ident) => {
         $crate::__entry!($sec, $inst, enable, $sym, (p: $crate::task::Task));
+    };
+    ($sec:literal, $inst:ident, update_idle, $sym:ident) => {
+        $crate::__entry!($sec, $inst, update_idle, $sym, (cpu: i32, idle: bool));
     };
     ($sec:literal, $inst:ident, exit, $sym:ident) => {
         $crate::__entry!($sec, $inst, exit, $sym, (ei: &$crate::task::ExitInfo));

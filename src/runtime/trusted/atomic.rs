@@ -41,6 +41,14 @@ impl AtomicU64 {
     pub fn fetch_add(&self, v: u64) {
         self.inner.fetch_add(v, Relaxed);
     }
+
+    /// Wrapping decrement. A counter that is incremented on one path and
+    /// decremented on another is exact only if the two are paired; the
+    /// pairing is the caller's invariant, not this wrapper's.
+    #[verifier::external_body]
+    pub fn fetch_sub(&self, v: u64) {
+        self.inner.fetch_sub(v, Relaxed);
+    }
 }
 
 } // verus!
