@@ -27,9 +27,10 @@ The pipeline is maintained in `dep/verus-bpf`, not under `src/`. Its
 add a README.md to verus-bpf. Lachesis owns its kernel selection, ordered
 runtime crates, and explicit trust boundaries in `src/sched/Makefile`.
 
-Four verified crates and one that is not. The BPF side is three of them
+Five verified crates and one that is not. The BPF side is four of them
 in dependency order -- `lachesis_runtime_trusted`, `lachesis_runtime`,
-then the policy -- each verified and compiled against the ones before it.
+`lachesis_model`, then the policy -- each verified and compiled against
+the ones before it; the model is ghost only and erases to an empty rlib.
 `lachesis_control` is verified beside them and imports none of them. The
 loader is verified by nothing.
 
@@ -41,7 +42,8 @@ loader is verified by nothing.
   views, the `Task` handle and its accessor specifications), `atomic.rs`
   (an opaque `AtomicU64` with no `Ordering` in its interface), `stats.rs`
   (`Stats<N>`, the `.bss` counters), `panic.rs` (the one
-  `#[panic_handler]`) and `ops.rs` (the `scheduler!` macro and its
+  `#[panic_handler]`), `flags.rs` (`Flags<N>`, per-CPU booleans other
+  CPUs read without a lock) and `ops.rs` (the `scheduler!` macro and its
   trampolines).
 - `src/runtime` — `lachesis_runtime`, the checked layer every scheduler
   links: `policy.rs` (the `Policy` trait, where a callback's contract is
@@ -49,6 +51,16 @@ loader is verified by nothing.
   the `prelude`. No `unsafe`, no cheats, verified with `--no-cheating`.
   It sits beside `trusted/` and not above it because it is substrate: it
   belongs to no one scheduler.
+- `src/model` — `lachesis_model`, the concurrent work-conservation model
+  (roadmap section 5.4): the sched_ext event model at one transition per
+  shared-variable access, the per-CPU-queue policy's actions under the
+  same names, Ipanema's definitions restated for it, the inductive
+  invariant and the theorem. Ghost only, verified with `--no-cheating`,
+  and last in `LIB_CRATES` so that a broken proof stops the object build.
+  `src/tla/` is its TLA+ mirror under the same action names; `make tlc`
+  checks the theorem there, confirms that four weakened variants of the
+  policy violate it, and that a fifth, the steal that gives up after its
+  first candidate, is tolerated.
 - `src/sched` — one scheduler, and everything about it that is verified:
   `bpf/main.rs` the policy, `control/` the crate `lachesis_control`, the
   Makefile stub, and the `vm-run.sh`/`vm-guest.sh` pair that runs the
@@ -61,6 +73,8 @@ loader is verified by nothing.
 src/
   runtime/         lachesis_runtime; substrate, verified
     trusted/       lachesis_runtime_trusted; assumed, `unsafe` lives here
+  model/           lachesis_model; the work-conservation model and proof
+  tla/             the TLA+ mirror of that model; `make tlc`
   sched/           one scheduler
     Makefile       PROG, SRC, KEEP_SYMS, USER_MANIFEST, USER_CORE_*
     bpf/main.rs    the BPF policy; verified, compiled by rules.mk
@@ -87,10 +101,12 @@ USER_MANIFEST := ../loader/Cargo.toml
 USER_CORE_SRC := control/src/lib.rs
 USER_CORE_NAME := lachesis_control
 ROOT_DIR := $(abspath ../..)
-LIB_CRATES := lachesis_runtime_trusted lachesis_runtime
+LLVM_PREFIX ?= $(if $(wildcard /usr/lib/llvm-22/bin/llc),/usr/lib/llvm-22,/usr)
+LIB_CRATES := lachesis_runtime_trusted lachesis_runtime lachesis_model
 lachesis_runtime_trusted_DIR := $(ROOT_DIR)/src/runtime/trusted
 lachesis_runtime_DIR := $(ROOT_DIR)/src/runtime
-NOCHEAT_CRATES := lachesis_runtime
+lachesis_model_DIR := $(ROOT_DIR)/src/model
+NOCHEAT_CRATES := lachesis_runtime lachesis_model
 TRUSTED_DIRS := $(lachesis_runtime_trusted_DIR)
 include ../../dep/verus-bpf/rules.mk
 ```
@@ -108,9 +124,32 @@ kernel; generic compilation machinery belongs in verus-bpf.
 
 A policy file is policy. It contains no `unsafe`, no `extern`, no
 `#[link_section]`, no `#[no_mangle]`, no raw pointers, no `#[btf]` and no
-`repr(C)`; `src/sched/bpf/main.rs` is the worked example and is just
-over a hundred lines. `use lachesis_runtime::prelude::*;` brings in
-everything, including the `verus!` macro.
+`repr(C)`; `src/sched/bpf/main.rs` is the worked example, under four
+hundred lines with its comments. `use lachesis_runtime::prelude::*;`
+brings in everything, including the `verus!` macro.
+
+What that policy does, in the mechanisms the work-conservation theorem
+is about. One user DSQ per CPU, ids equal to the CPU numbers, created in
+`init`, which refuses a machine with more than `MAX_CPUS`. `select_cpu`
+returns the previous CPU and nothing else: the placement is `enqueue`'s,
+and a task is never direct-dispatched to a local DSQ, because a task there
+cannot be stolen. `enqueue` publishes first, bumping `nr_queued`, then
+runs the kernel's idle search as often as it finds idle CPUs: each hit is
+claimed and kicked; the first whose queue is empty and whose `claimed`
+mark is down takes the task and gets the mark; one with work already
+queued, or a mark up, is left to that; a search that finds nothing files
+the task on the CPU it woke on. `dequeue`, which the kernel calls exactly
+once when custody ends, takes the count back down. `dispatch` drains its
+own queue and otherwise scans every other CPU, stealing from the first
+that is running a task and has another queued, going on to the next when
+the move fails; whoever consumes from a queue clears its claim mark.
+`running` and `stopping` keep the per-CPU `busy` flag the steal consults.
+`update_idle`, which the kernel calls after setting the CPU's idle bit,
+reads the count and, if it is non-zero, claims its own bit with a
+test-and-clear and kicks self. The publish and the self-claim are the two
+sides of the idle interlock: either the enqueue sees the bit or the idle
+CPU sees the count. Each of these rules closed a trace the model found,
+and `src/model/lib.rs` says which.
 
 The state is a struct and the callbacks are an `impl Policy`, both inside
 `verus!`, so Verus checks them:
@@ -118,19 +157,25 @@ The state is a struct and the callbacks are an `impl Policy`, both inside
 ```rust
 verus! {
 
-const GLOBAL: usize = 1;
+const QUEUED: usize = 1;
 
 pub struct Lachesis {
     vtime_now: AtomicU64,
-    stats: Stats<3>,
+    stats: Stats<7>,
 }
 
 impl Policy for Lachesis {
     fn enqueue(&self, p: Task, enq_flags: u64) {
-        self.stats.inc(GLOBAL);
-        let now = self.vtime_now.load();
-        let vtime = clamp_vtime(p.vtime(), now, SCX_SLICE_DFL);
-        scx::dsq_insert_vtime(&p, SHARED_DSQ, SCX_SLICE_DFL, vtime, enq_flags);
+        let vtime = clamp_vtime(p.vtime(), self.vtime_now.load(), SCX_SLICE_DFL);
+        let cpu = scx::task_cpu(&p);
+        self.nr_queued.fetch_add(1);
+        let (target, is_idle) = scx::select_cpu_dfl(&p, cpu, 0);
+        let q = if is_idle { target as u32 } else { cpu as u32 };
+        self.stats.inc(QUEUED);
+        scx::dsq_insert_vtime(&p, q as u64, SCX_SLICE_DFL, vtime, enq_flags);
+        if is_idle {
+            scx::kick_cpu(target, SCX_KICK_IDLE);
+        }
     }
 }
 
@@ -159,18 +204,28 @@ Anything a policy names from inside `verus!` has to be declared inside
 `verus!` too, `const`s included; an item outside the macro is external to
 Verus and cannot be named from checked code.
 
+A loop in a callback carries an `invariant` and a `decreases`, and Verus
+verifies its body in isolation: a fact the body relies on -- the trait's
+`cpu >= 0`, say, when the body kicks that CPU -- is restated in the
+invariant or it is not there. Every scan is bounded by the constant
+`MAX_CPUS`, which is a bound the BPF verifier can see too; the
+64-iteration steal in `dispatch` costs it about eighty thousand
+instructions of the million it allows.
+
 `scheduler!` wires the impl to the kernel:
 
 ```rust
 scheduler! {
     map: lachesis_ops,
     name: "lachesis",
+    flags: SCX_OPS_KEEP_BUILTIN_IDLE,
     policy: LACHESIS: Lachesis = Lachesis {
         vtime_now: AtomicU64::new(0),
         stats: Stats::new(),
     },
     ops {
         enqueue as lachesis_enqueue,
+        update_idle as lachesis_update_idle,
     }
     sleepable {
         init as lachesis_init,
@@ -182,7 +237,10 @@ scheduler! {
 policy, its type, and a `const` initializer. The static is emitted outside
 `verus!` and handed to every callback as `&self`; `bpftool map dump name
 <first 8 chars of the object>.bss` prints the whole of it, counters
-included. Each `ops` line is "struct_ops member `as` exported program
+included. `flags:` is optional and lands in the ops table's `flags`
+member; implementing `update_idle` turns the kernel's idle tracking off
+unless `SCX_OPS_KEEP_BUILTIN_IDLE` is passed, and without that tracking
+`select_cpu_dfl` stops working. Each `ops` line is "struct_ops member `as` exported program
 symbol" and nothing more -- the trait fixes the signature, and
 `__trampoline!` in `src/runtime/trusted/ops.rs` has one rule per member
 name that knows the context layout. Two names per line is the floor, because
@@ -267,9 +325,10 @@ than by hardcoded offsets: it walks the `.bss` datasec's variables down to
 their leaf integers, keeping dotted names, with one simplification, that a
 struct with a single member contributes no name of its own. Rust's atomics
 are four nested single-field newtypes, so without that every counter would
-print as `LACHESIS.stats.counters[0].v.value.__0`. Three leaf names are
+print as `LACHESIS.stats.counters[0].v.value.__0`. Four leaf names are
 special, matched on the last dotted component: `vtime_now` is printed as
-the clock, `exit_kind` and `exit_code` are the exit report. Everything else
+the clock, `nr_queued` as a gauge, `exit_kind` and `exit_code` are the
+exit report; and the per-CPU arrays `busy` and `claimed` are skipped. Everything else
 is a counter and its per-interval delta is printed. Adding a counter to
 the policy needs no change to the loader.
 
@@ -343,13 +402,24 @@ So the BPF side copies the two fields that matter into its own static:
   loader's), and both survive `lachesis-clean` — use
   `make -C src/sched distclean` to drop them.
 - `make lachesis-run` streams the guest transcript as it happens and
-  also writes it to `build/lachesis/run.log`. `LACHESIS_SECS`
+  also writes it to `build/lachesis/run.log`. The guest runs one spinner
+  fewer than it has CPUs plus twice as many bursty tasks, so that CPUs
+  keep going idle while queued work exists: that is what makes the steal
+  and kick counters move. `LACHESIS_SECS`
   (default 5) is how long the guest keeps the scheduler attached. Ctrl-C
   ends the run within about half a second and exits 130. `VM_TIMEOUT`
   (default 300) is the hard deadline for the whole run, enforced by a
   watchdog in `vm-run.sh`, and exits 124. Do not reintroduce a `timeout`
   around `vng`: the script's header explains why it cannot end a run and
   why it breaks the watchdog that can.
+- `make tlc` runs TLC over `src/tla/`: the positive configurations must
+  pass and every negative variant must report a violation. It fetches
+  TLA+ tools 1.7.4 into `build/tla/` on first use, the last release that
+  runs on this host's Java 8, and keeps TLC's state files there too.
+- `src/sched/Makefile` picks `LLVM_PREFIX` itself: Ubuntu's
+  `/usr/lib/llvm-22` when it exists, `/usr` otherwise, which is where the
+  system LLVM 22 lives on the development host. Override it for anything
+  else.
 - Programs are heap-free: the pipeline builds `core`, `compiler_builtins`
   and `btf`, never `alloc`. The `bpf_alloc`/`bpf_free` kfuncs upstream's
   allocator bound exist in no kernel; if a policy ever needs dynamic
@@ -378,14 +448,16 @@ So the BPF side copies the two fields that matter into its own static:
   by the `verus!` macro. `dep/verus-bpf/TOOLCHAIN.md` has the details and the
   toolchain matrix; the short version is that `rustc` is Verus's pin and its
   LLVM must not be newer than the LLVM tools.
-- Three crates, in dependency order: `lachesis_runtime_trusted`,
-  `lachesis_runtime`, then the policy. `make verify` (or `make -C
-  src/sched verify`) runs Verus over each in turn and fails unless each
-  reports `0 errors`; each exports its proofs as a `.vir` that the next
-  ones import. All three erased compiles depend on all three passes, so
-  `make lachesis` verifies before it compiles, and prints the trusted line
-  count when it is done.
-- A fourth pass, `lachesis_control`, runs beside them and is reported on
+- Four crates, in dependency order: `lachesis_runtime_trusted`,
+  `lachesis_runtime`, `lachesis_model`, then the policy. `make verify`
+  (or `make -C src/sched verify`) runs Verus over each in turn and fails
+  unless each reports `0 errors`; each exports its proofs as a `.vir`
+  that the next ones import. All four erased compiles depend on all four
+  passes, so `make lachesis` verifies before it compiles, and prints the
+  trusted line count when it is done. The model imports the two runtime
+  crates only because the pipeline hands every library its predecessors;
+  it names nothing from them.
+- A fifth pass, `lachesis_control`, runs beside them and is reported on
   its own line. It is a leaf: it imports none of the other crates, so it
   names no rlibs and no search paths, and it runs with `--no-cheating`
   unconditionally. The BPF object depends on it too, so a broken proof on
@@ -394,7 +466,7 @@ So the BPF side copies the two fields that matter into its own static:
   check over the merged crate graph, so a crate that *calls* an
   `external_body` function out of `lachesis_runtime_trusted` is rejected
   too, even though the cheat is not its own. The flag is therefore on for
-  `lachesis_runtime`, which calls none, and off for
+  `lachesis_runtime` and `lachesis_model`, which call none, and off for
   `lachesis_runtime_trusted` and for the policy; `NOCHEAT_CRATES` in
   `rules.mk` is the list. `make
   lint-trusted` is what actually keeps cheats out of everything but

@@ -24,15 +24,23 @@ and speed real workloads need.
 
 ## Summary
 
-Lachesis is an early research prototype. The current scheduler uses a shared
-queue ordered by virtual time, with a direct path to idle CPUs. The build
-checks the policy, runtime, and userspace control crate with Verus before compiling
-the BPF object and loader.
+Lachesis is an early research prototype. The current scheduler keeps one
+virtual-time queue per CPU, places a waking task on an idle CPU's queue when
+its enqueue finds one, steals from overloaded CPUs when a CPU runs dry, and
+interlocks enqueue and idle entry through a published count. The build
+checks the policy, the runtime, the userspace control crate and a model of
+the scheduler under the kernel with Verus before compiling the BPF object
+and loader.
 
-These checks establish the contracts written in the code. Whole-scheduler
-proofs of starvation freedom, work conservation, and bounded fairness remain
-goals. Kernel bindings and their assumed contracts live in an explicit trusted
-base; the loader and compilation pipeline are also outside the proofs.
+The model carries the first whole-scheduler theorem: concurrent work
+conservation in the sense of the Ipanema paper, restated for sched_ext and
+proved as an inductive invariant. A TLA+ mirror of the same model checks it
+with TLC and shows that four weakened variants of the policy violate it.
+Starvation freedom and bounded fairness remain goals, and the correspondence
+between the model's actions and the compiled callbacks is by construction
+rather than checked. Kernel bindings and their assumed contracts live in an
+explicit trusted base; the loader and compilation pipeline are also outside
+the proofs.
 
 ## Build and run
 
