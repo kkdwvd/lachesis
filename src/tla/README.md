@@ -22,9 +22,11 @@ conservation, evaluated at the end of every event through the ghost sets
 `B` and `U` and the extended `E`. `WCStrong` is the stronger statement the
 Verus proof establishes: while any CPU is stuck (halted, idle bit up, no
 kick pending) no CPU is overloaded, at every state. `KickResolves`, under
-weak fairness on everything but a task blocking, is the discharge of E: a
-pending kick ends with the CPU running something or with nothing
-overloaded anywhere.
+fairness on everything but a task blocking, strong for the three steps
+that take an rq lock, since a lock holder's release enables them only
+intermittently, and weak for the rest, is the discharge of E: a pending
+kick ends with the CPU running something or with nothing overloaded
+anywhere.
 
 Configurations: `pos_*` must pass; each `neg_*` weakens the policy by one
 constant and must report a violation. `neg_no_steal` violates
