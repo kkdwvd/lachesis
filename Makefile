@@ -47,7 +47,7 @@ LACHESIS_MAKE = $(MAKE) -C $(LACHESIS_DIR) \
 	kkd-sync verus-bpf-sync verus-sync all-sync sync \
 	kkd-rebase verus-bpf-rebase verus-rebase all-rebase rebase \
 	verus verus-clean \
-	verify lachesis lachesis-run lachesis-clean rust-project
+	verify lachesis lachesis-run lachesis-clean rust-project tlc
 
 .NOTPARALLEL: all-sync
 
@@ -131,6 +131,7 @@ help:
 		'  lachesis-run       Boot a VM, run the loader as its scheduler' \
 		'  lachesis-clean     Remove the lachesis build outputs' \
 		'  rust-project       Write rust-project.json for rust-analyzer' \
+		'  tlc                TLC over the TLA+ work-conservation model and its variants' \
 		'' \
 		'Useful overrides:' \
 		'  <DEP>_REBASE_REMOTE/_BRANCH/_URL with DEP=KKD, VERUS_BPF or VERUS' \
@@ -213,3 +214,9 @@ lachesis-clean:
 # support".
 rust-project:
 	$(LACHESIS_MAKE) rust-project
+
+# The TLA+ mirror of the work-conservation model in src/model; the positive
+# configurations must pass and every negative variant must fail. See
+# src/tla/README.md.
+tlc:
+	$(MAKE) -C src/tla BUILD_DIR=$(BUILD_DIR)
