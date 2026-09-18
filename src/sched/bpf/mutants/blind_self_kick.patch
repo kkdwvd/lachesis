@@ -1,0 +1,21 @@
+# blind_self_kick: a policy the contracts must reject.
+#
+# `update_idle` kicks itself on a non-zero count without first claiming
+# its own idle bit.
+#
+# The model's counterexample: an enqueue has already claimed this CPU
+# through the search and is filing a task for its queue; the CPU kicks
+# itself, goes through `dispatch`, steals something else, and the task
+# filed for it waits behind the stolen one. The contract allows a `Kick`
+# only after a `TestAndClearIdle` of the own CPU that found the bit up.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -329,7 +329,6 @@
+     fn update_idle(&self, cpu: i32, idle: bool, log: &mut Log) {
+         if idle
+             && self.nr_queued.load(log) > 0
+-            && scx::test_and_clear_cpu_idle(cpu, log)
+         {
+             self.stats.inc(KICK_IDLE);
+             scx::kick_cpu(cpu, SCX_KICK_IDLE, log);

@@ -1,0 +1,21 @@
+# unchecked_claim: a policy the contracts must reject.
+#
+# Take a claimed CPU without reading its queue first.
+#
+# The model's counterexample: filing on another CPU's queue takes no lock
+# of that CPU, so a task can land there between that CPU's failed dispatch
+# and its idle bit going up. A claimed CPU can therefore already have work;
+# a second task filed behind it waits out a slice while a third CPU idles.
+# The automaton allows a `Claim` only after a `NrQueued` of that CPU read
+# zero.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -208,7 +208,6 @@
+             // beyond the queues cannot come back from the search after a
+             // successful `init`; it is kicked all the same.
+             if (target as u32) < n
+-                && scx::dsq_nr_queued(target as u64, log) <= 0
+                 && !self.claimed.test_and_set(target as usize, log)
+             {
+                 q = target as u32;

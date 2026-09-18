@@ -18,6 +18,10 @@ KEEP_SYMS := lachesis_ops \
              LACHESIS \
              _LICENSE
 
+# Policies the contracts must reject, one patch against bpf/main.rs each;
+# `make verify` fails if Verus accepts any of them.
+MUTANTS := $(sort $(wildcard bpf/mutants/*.patch))
+
 # The userspace side: the unverified loader in ../loader, and the verified
 # control-plane crate beside this policy that it calls.
 USER_MANIFEST := ../loader/Cargo.toml

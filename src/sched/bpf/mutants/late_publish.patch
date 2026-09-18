@@ -1,0 +1,29 @@
+# late_publish: a policy the contracts must reject.
+#
+# Bump the published count after the idle search instead of before it.
+#
+# The count is what an idle CPU reads in `update_idle`, and the interlock
+# is that either the enqueue's search sees the idle bit or the idle CPU's
+# read sees the count. Published after the search, a CPU whose bit went up
+# during the search reads zero and stays idle while the task is filed on a
+# busy queue. Ipanema's `cload` is bumped before the thread is added for
+# the same reason. The automaton allows no `SelectDfl` before `CountInc`.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -175,7 +175,6 @@
+             scx::dsq_insert_vtime(&p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, vtime, enq_flags, log);
+             return;
+         }
+-        self.nr_queued.inc(log);
+         let mut q: u32 = cpu as u32;
+         let mut placed_idle = false;
+         let mut tries: u32 = 0;
+@@ -222,6 +221,7 @@
+         } else {
+             self.stats.inc(PLACE_BUSY);
+         }
++        self.nr_queued.inc(log);
+         scx::dsq_insert_vtime(&p, q as u64, SCX_SLICE_DFL, vtime, enq_flags, log);
+     }
+ 

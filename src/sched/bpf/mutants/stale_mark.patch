@@ -1,0 +1,22 @@
+# stale_mark: a policy the contracts must reject.
+#
+# A steal does not clear the victim's claim mark.
+#
+# The mark then outlives the task it was set for. The next enqueue whose
+# search claims that CPU finds the mark up, takes it for a task still on
+# its way, and files elsewhere; the CPU is kicked for nothing and idles
+# with its queue empty. The dispatch automaton ends a successful move with
+# an `Unclaim` of the CPU it moved from.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -274,9 +274,6 @@
+                 && scx::dsq_nr_queued(c as u64, log) > 0
+                 && scx::dsq_move_to_local(c as u64, log)
+             {
+-                // If that was a task an enqueue had filed there for a
+-                // claim, the claim is served; the mark must not outlive it.
+-                self.claimed.clear(c as usize, log);
+                 self.stats.inc(STEAL);
+                 return;
+             }

@@ -1,0 +1,20 @@
+# no_kick: a policy the contracts must reject.
+#
+# Claim an idle CPU through the kernel's search but never kick it.
+#
+# The search clears the CPU's idle bit, so no later enqueue can find it,
+# and nothing wakes it: the task filed on its queue waits until something
+# else happens to run there. The automaton demands a `Kick` of the claimed
+# CPU before anything else is asked of it.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -200,8 +200,6 @@
+             if !is_idle {
+                 break;
+             }
+-            // Claimed, so kicked, before anything else is asked of it.
+-            scx::kick_cpu(target, SCX_KICK_IDLE, log);
+             // Ours if it has a queue, its queue is empty and no earlier
+             // claim is still waiting to land there; otherwise the kick
+             // alone is what it needed, and the search goes on. A CPU

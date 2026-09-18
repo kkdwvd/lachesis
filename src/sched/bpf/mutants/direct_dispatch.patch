@@ -1,0 +1,28 @@
+# direct_dispatch: a policy the contracts must reject.
+#
+# `select_cpu` dispatches straight to the idle CPU's local DSQ, as the
+# kernel's default `select_cpu` and `scx_simple` do.
+#
+# A task on a local DSQ cannot be stolen. The model found the trace: the
+# direct dispatch lands on a CPU that has meanwhile been kicked to steal a
+# task from elsewhere, and the dispatched task waits behind the stolen one
+# while another CPU idles. `select_cpu` may leave no receipts at all: its
+# contract is that the placement is `enqueue`'s.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -144,8 +144,12 @@
+     /// default, which direct-dispatches to a local DSQ when it finds an
+     /// idle CPU and skips `enqueue` altogether: see the header for the
+     /// bubble that opens.
+-    fn select_cpu(&self, _p: Task, prev_cpu: i32, _wake_flags: u64, _log: &mut Log) -> i32 {
+-        prev_cpu
++    fn select_cpu(&self, p: Task, prev_cpu: i32, wake_flags: u64, log: &mut Log) -> i32 {
++        let (cpu, is_idle) = scx::select_cpu_dfl(&p, prev_cpu, wake_flags, log);
++        if is_idle {
++            scx::dsq_insert(&p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0, log);
++        }
++        cpu
+     }
+ 
+     /// Publish, place, file, kick. The count goes up first, because the

@@ -1,0 +1,70 @@
+# local_place: a policy the contracts must reject.
+#
+# Place the task where it woke up and never look for an idle CPU.
+#
+# This is the Overload-on-Wakeup bug of Lozi et al. (EuroSys 2016), which
+# the Ipanema paper's work-conservation property is formulated to rule out:
+# a waking task is queued on a busy core while another core idles, and only
+# the periodic balancer can fix it. The enqueue automaton lets a task be
+# filed on its own CPU only after the idle search has run its full length;
+# an insert after zero rounds is a `Published` state that `Insert` does not
+# leave, so the postcondition fails.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -176,53 +176,8 @@
+             return;
+         }
+         self.nr_queued.inc(log);
+-        let mut q: u32 = cpu as u32;
+-        let mut placed_idle = false;
+-        let mut tries: u32 = 0;
+-        // Each pass claims one more idle CPU, so the search cannot see the
+-        // same one twice and ends within `n` passes.
+-        while tries < n
+-            invariant_except_break
+-                q == cpu as u32,
+-                refine::searching(cpu as int, n as int, tries as int,
+-                                  refine::enq_run(refine::tail_of(pre, log.ops@))),
+-            invariant
+-                tries <= n,
+-                n <= MAX_CPUS,
+-                q < n,
+-                cpu >= 0,
+-                refine::extends(pre, log.ops@),
+-            ensures
+-                refine::insert_finishes(refine::enq_run(refine::tail_of(pre, log.ops@)), q as u64),
+-            decreases n - tries,
+-        {
+-            let (target, is_idle) = scx::select_cpu_dfl(&p, cpu, 0, log);
+-            if !is_idle {
+-                break;
+-            }
+-            // Claimed, so kicked, before anything else is asked of it.
+-            scx::kick_cpu(target, SCX_KICK_IDLE, log);
+-            // Ours if it has a queue, its queue is empty and no earlier
+-            // claim is still waiting to land there; otherwise the kick
+-            // alone is what it needed, and the search goes on. A CPU
+-            // beyond the queues cannot come back from the search after a
+-            // successful `init`; it is kicked all the same.
+-            if (target as u32) < n
+-                && scx::dsq_nr_queued(target as u64, log) <= 0
+-                && !self.claimed.test_and_set(target as usize, log)
+-            {
+-                q = target as u32;
+-                placed_idle = true;
+-                break;
+-            }
+-            tries = tries + 1;
+-        }
+-        if placed_idle {
+-            self.stats.inc(PLACE_IDLE);
+-        } else {
+-            self.stats.inc(PLACE_BUSY);
+-        }
+-        scx::dsq_insert_vtime(&p, q as u64, SCX_SLICE_DFL, vtime, enq_flags, log);
++        self.stats.inc(PLACE_BUSY);
++        scx::dsq_insert_vtime(&p, cpu as u64, SCX_SLICE_DFL, vtime, enq_flags, log);
+     }
+ 
+     /// The task is leaving custody: consumed by a dispatch here or on the

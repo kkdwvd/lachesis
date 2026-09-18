@@ -1,0 +1,19 @@
+# off_by_one: a policy the contracts must reject.
+#
+# The steal scan stops one CPU short.
+#
+# The last CPU is never stolen from; a task queued there behind a long
+# slice waits while other CPUs idle. The dispatch contract accepts an idle
+# exit only with the scan past the last CPU.
+#
+--- bpf/main.rs
++++ bpf/main.rs
+@@ -256,7 +256,7 @@
+         }
+         let n = nr_cpus(log);
+         let mut c: u32 = 0;
+-        while c < n
++        while c + 1 < n
+             invariant
+                 c <= n,
+                 n <= MAX_CPUS,
