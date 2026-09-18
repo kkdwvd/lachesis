@@ -17,17 +17,27 @@ JAVA ?= java
 WORKERS ?= auto
 TLC = $(JAVA) -XX:+UseParallelGC -cp $(JAR) tlc2.TLC -workers $(WORKERS) -cleanup
 
-# tol_first_only is a weakened policy the design tolerates: a steal that
-# gives up after its first candidate is caught by the idle-side count check,
-# so it must pass. pos_3x2 is the long one, hours on this host.
-POSITIVE := pos_2x2 pos_2x3 tol_first_only pos_2x2_live pos_3x2
+# The positive configurations must pass and the negative ones, each the
+# policy weakened by one constant, must report a violation. `all` runs the
+# two-CPU ones, seconds to half an hour each. `long` runs the three-CPU
+# ones: pos_3x3h and pos_3x3b pin every task's home CPU and are the
+# configurations that found the two races the design was changed for, so
+# they stay as regressions; tol_first_only is a steal that gives up after
+# its first candidate, which the idle-side count check tolerates -- at two
+# CPUs it is indistinguishable from the policy, so it needs three; pos_3x2
+# is the unconstrained three-CPU run, hours on this host.
+POSITIVE := pos_2x2 pos_2x3 pos_2x2_live
 NEGATIVE := neg_no_steal neg_no_enq_kick neg_no_idle_kick neg_local_select
+LONG := pos_3x3h pos_3x3b tol_first_only pos_3x2
 
 .NOTPARALLEL:
-.PHONY: all fetch clean
+.PHONY: all long fetch clean
 
 all: $(POSITIVE:%=$(TLA_DIR)/%.ok) $(NEGATIVE:%=$(TLA_DIR)/%.ok)
 	@echo "tlc: every configuration behaved as expected"
+
+long: $(LONG:%=$(TLA_DIR)/%.ok)
+	@echo "tlc: every long configuration behaved as expected"
 
 fetch: $(JAR)
 
